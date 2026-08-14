@@ -37,7 +37,10 @@ def main() -> None:
     retrieve.add_argument("--faiss-index", type=Path)
     retrieve.add_argument("--videos-dir", type=Path, required=True)
     retrieve.add_argument("--query", required=True)
-    retrieve.add_argument("--query-embedding", type=Path, required=True)
+    retrieve.add_argument("--query-embedding", type=Path)
+    retrieve.add_argument("--model-name", default="ViT-B-32")
+    retrieve.add_argument("--pretrained", default="openai")
+    retrieve.add_argument("--device", default="cpu")
     retrieve.add_argument("--output", type=Path, required=True)
     retrieve.add_argument("--media-info-dir", type=Path)
     retrieve.add_argument("--top-k", type=int, default=100)
@@ -86,7 +89,19 @@ def main() -> None:
             index = FrameIndex.from_persisted_faiss(args.manifest, args.embeddings, args.faiss_index)
         else:
             index = FrameIndex.from_files(args.manifest, args.embeddings)
-        query_embedding = np.load(args.query_embedding, allow_pickle=False)
+
+        if args.query_embedding:
+            query_embedding = np.load(args.query_embedding, allow_pickle=False)
+        else:
+            from .query_encoder import CLIPQueryEncoder
+
+            encoder = CLIPQueryEncoder(
+                model_name=args.model_name,
+                pretrained=args.pretrained,
+                device=args.device,
+            )
+            query_embedding = encoder.encode_one(args.query)
+
         pipeline = AICPipeline(index, args.videos_dir, media_info_dir=args.media_info_dir)
         result = pipeline.run(
             args.query,
