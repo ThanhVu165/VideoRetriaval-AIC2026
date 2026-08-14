@@ -14,9 +14,28 @@ Source video
   -> source-video manifest
   -> temporal structure
   -> candidate windows
+
+CLIP frame features
+  -> normalize
+  -> persistent FAISS IndexFlatIP
+  -> index metadata
 ```
 
 `aic2026.video` provides deterministic probing and original-frame decoding. `aic2026.video_manifest` builds a batch manifest for source videos.
+
+The retrieval index can be persisted with `aic2026.index_builder`. The FAISS index stores vectors only; the unified manifest remains the canonical row-to-video/frame mapping. This avoids duplicating metadata and protects the distinction between `keyframe_idx` and `original_frame_id`.
+
+Build it once:
+
+```bash
+python -m aic2026 build-index \
+  --manifest artifacts/dataset_manifest.parquet \
+  --embeddings artifacts/clip_frames.npy \
+  --output-index artifacts/clip_frames.faiss \
+  --metadata-output artifacts/clip_frames.index.json
+```
+
+FAISS is optional. Install a compatible `faiss-cpu` build when the persistent index path is used; the NumPy backend remains available for environments without FAISS.
 
 ## Online
 
@@ -35,18 +54,13 @@ Natural-language query
 
 The end-to-end orchestration lives in `aic2026.pipeline.AICPipeline`.
 
-### Multi-frame candidate generation
-
-The pipeline retrieves a larger frame pool than the final Top-k and aggregates the strongest `per_video_k` frames. The video score combines the best frame with the mean score of the strongest supporting frames. This reduces sensitivity to one noisy keyframe while retaining single-frame recall.
-
-The strongest retrieved frame remains the coarse temporal anchor, and its `object_path` is retained for multimodal evidence.
-
-### Running the baseline pipeline
+For repeated inference, reuse the persisted FAISS index:
 
 ```bash
 python -m aic2026 retrieve \
   --manifest artifacts/dataset_manifest.parquet \
   --embeddings artifacts/clip_frames.npy \
+  --faiss-index artifacts/clip_frames.faiss \
   --videos-dir data/videos \
   --query "a person enters a room" \
   --query-embedding artifacts/query_embedding.npy \
@@ -90,7 +104,8 @@ KIS consumes `(video_id, frame_id)`, Q&A adds an answer, and TRAKE produces an o
 - `aic2026/video.py`: source-video probing and exact original-frame decoding.
 - `aic2026/video_manifest.py`: batch source-video manifest generation.
 - `aic2026/temporal.py`: temporal-window aggregation and frame refinement.
-- `aic2026/retrieval.py`: BTC CLIP frame/video candidate retrieval.
+- `aic2026/retrieval.py`: BTC CLIP frame/video candidate retrieval plus persistent FAISS loading.
+- `aic2026/index_builder.py`: offline FAISS index construction.
 - `aic2026/multimodal.py`: object/metadata auxiliary reranking.
 - `aic2026/pipeline.py`: multi-frame candidate generation and end-to-end temporal localization.
 - `aic2026/clip_runtime.py`: optional OpenCLIP text/image scoring adapter.
