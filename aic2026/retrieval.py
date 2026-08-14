@@ -19,6 +19,7 @@ class SearchResult:
     pts_time: float
     score: float
     image_path: str
+    object_path: str = ""
 
 
 class FrameIndex:
@@ -96,6 +97,7 @@ class FrameIndex:
                     pts_time=float(row.pts_time),
                     score=float(score),
                     image_path=str(row.image_path),
+                    object_path=str(row.get("object_path", "")),
                 )
             )
         return out
@@ -108,12 +110,7 @@ class FrameIndex:
         aggregation: VideoAggregation = "max",
         per_video_k: int = 3,
     ) -> pd.DataFrame:
-        """Return ranked candidate videos from frame retrieval.
-
-        This is a retrieval baseline, not the official AIC evaluator. The
-        aggregation rule is intentionally configurable because the official
-        query/ground-truth package is not present in the current repository.
-        """
+        """Return ranked candidate videos from frame retrieval."""
         frames = self.search_frames(query_embedding, top_k=top_k_frames)
         if not frames:
             return pd.DataFrame(columns=["video_id", "score", "best_frame_idx", "best_frame_id", "best_pts_time"])
@@ -135,7 +132,7 @@ class FrameIndex:
 
         best = rows.sort_values("score", ascending=False).drop_duplicates("video_id")
         result = result.merge(
-            best[["video_id", "keyframe_idx", "original_frame_id", "pts_time"]],
+            best[["video_id", "keyframe_idx", "original_frame_id", "pts_time", "object_path"]],
             on="video_id",
             how="left",
         ).rename(columns={
