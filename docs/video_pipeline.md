@@ -1,6 +1,6 @@
 # AIC 2026 Video Processing Pipeline
 
-This document defines the first implementation layer beyond the supplied keyframe/CLIP corpus.
+This document defines the implementation layer beyond the supplied keyframe/CLIP corpus.
 
 ## Source of truth
 
@@ -16,27 +16,72 @@ Source video
   -> candidate windows
 ```
 
-The current implementation provides deterministic video probing and original-frame decoding. Shot-boundary detection and learned temporal scoring are deliberately model-agnostic and will be added after the baseline is benchmarked.
+`aic2026.video` provides deterministic probing and original-frame decoding. `aic2026.video_manifest` builds a batch manifest for source videos.
 
 ## Online
 
 ```text
 Natural-language query
-  -> CLIP/BTC candidate retrieval
-  -> video ranking
-  -> temporal window generation
+  -> query embedding adapter
+  -> CLIP candidate retrieval
+  -> object + metadata reranking
+  -> coarse temporal window
+  -> original-video frame decoding
   -> fine frame scoring
   -> semantic keyframe
+  -> final ranking / Top-k
 ```
 
-KIS consumes `(video_id, frame_id)`, Q&A adds an answer, and TRAKE produces an ordered sequence of semantic keyframes. The official BTC scoring package should only be implemented from the eventual AIC 2026 query/ground-truth/submission specification.
+The end-to-end orchestration lives in `aic2026.pipeline.AICPipeline`.
+
+### Running the baseline pipeline
+
+```bash
+python -m aic2026 retrieve \
+  --manifest artifacts/dataset_manifest.parquet \
+  --embeddings artifacts/clip_frames.npy \
+  --videos-dir data/videos \
+  --query "a person enters a room" \
+  --query-embedding artifacts/query_embedding.npy \
+  --media-info-dir data/media_info \
+  --top-k 100 \
+  --radius-frames 15 \
+  --output artifacts/candidates.json
+```
+
+The query embedding is an explicit input. The command does not silently choose a query encoder that may be incompatible with the BTC-provided CLIP features.
+
+## Fine temporal scoring
+
+`AICPipeline.localize()` accepts a `frame_scorer` callback. `aic2026.clip_runtime.OpenCLIPRuntime` is an optional adapter that can encode a text query and score decoded frames with a configurable ViT-B/32 checkpoint.
+
+For reproducibility, the checkpoint used for fine scoring should be made compatible with the checkpoint that generated the supplied BTC frame features whenever possible.
+
+## TRAKE
+
+`aic2026.alignment.monotonic_event_alignment()` performs ordered event-to-frame assignment with dynamic programming. It enforces monotonic temporal order and supports a minimum frame separation.
+
+## Q&A
+
+`aic2026.vqa` defines a model-agnostic `VLMAnswerer` adapter. The retrieval/localization pipeline produces the visual evidence; a selected VLM can then answer the question from those frames.
+
+## Ranking
+
+`aic2026.ranking` keeps retrieval, temporal and multimodal evidence separate. This is intentional: later experiments can replace the fixed fusion with learned-to-rank models without changing the data flow.
+
+KIS consumes `(video_id, frame_id)`, Q&A adds an answer, and TRAKE produces an ordered sequence of semantic keyframes. The official BTC scoring/submission implementation should only be added from the AIC 2026 query/ground-truth/submission specification.
 
 ## Current code
 
 - `aic2026/video.py`: source-video probing and exact original-frame decoding.
-- `aic2026/video_manifest.py`: batch probe for a video directory.
-- `aic2026/temporal.py`: generic temporal-window aggregation and frame refinement.
-- `aic2026/retrieval.py`: existing BTC CLIP frame/video candidate retrieval baseline.
-- `aic2026/build_index.py`: existing ordered CLIP matrix construction.
+- `aic2026/video_manifest.py`: batch source-video manifest generation.
+- `aic2026/temporal.py`: temporal-window aggregation and frame refinement.
+- `aic2026/retrieval.py`: BTC CLIP frame/video candidate retrieval.
+- `aic2026/multimodal.py`: object/metadata auxiliary reranking.
+- `aic2026/pipeline.py`: end-to-end candidate → temporal localization orchestration.
+- `aic2026/clip_runtime.py`: optional OpenCLIP text/image scoring adapter.
+- `aic2026/alignment.py`: TRAKE semantic keyframe alignment.
+- `aic2026/vqa.py`: VLM answerer contract.
+- `aic2026/ranking.py`: final ranking and deterministic Top-k selection.
 
 Competition videos and generated indexes remain outside Git.
