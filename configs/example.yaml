@@ -1,0 +1,14 @@
+data_root: ./data
+keyframes_dir: ./data/keyframes
+clip_dir: ./data/clip
+mapping_dir: ./data/mapping
+media_info_dir: ./data/media_info
+objects_dir: ./data/objects
+artifacts_dir: ./artifacts
+
+# Scan settings
+audit:
+  image_extensions: [jpg, jpeg, png, webp]
+  object_extensions: [json]
+  feature_extensions: [npy, npz]
+  max_manifest_rows: 5000000
