@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from collections import Counter
 from pathlib import Path
@@ -18,7 +19,7 @@ CSV_SUFFIXES = {".csv"}
 
 def load_config(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        return yaml.safe_load(f) or {}
 
 
 def iter_files(root: Path, suffixes: set[str] | None = None):
@@ -35,12 +36,14 @@ def audit_images(root: Path) -> tuple[list[dict[str, Any]], Counter]:
     for p in iter_files(root, IMAGE_SUFFIXES):
         video_id = p.parent.name
         counts[video_id] += 1
-        rows.append({
-            "video_id": video_id,
-            "keyframe_name": p.stem,
-            "keyframe_path": str(p),
-            "suffix": p.suffix.lower(),
-        })
+        rows.append(
+            {
+                "video_id": video_id,
+                "keyframe_name": p.stem,
+                "keyframe_path": str(p),
+                "suffix": p.suffix.lower(),
+            }
+        )
     return rows, counts
 
 
@@ -81,32 +84,124 @@ def inspect_json_files(root: Path) -> dict[str, Any]:
 
 
 def inspect_mapping_files(root: Path) -> dict[str, Any]:
-    """Inspect BTC keyframe mapping CSVs without assuming their column names."""
     files = list(iter_files(root, CSV_SUFFIXES)) if root.exists() else []
     column_counts: Counter = Counter()
     samples: list[dict[str, Any]] = []
-
     for p in files[:10]:
         try:
             df = pd.read_csv(p)
             columns = [str(c) for c in df.columns]
             column_counts.update(columns)
-            sample_rows = df.head(3).to_dict(orient="records")
-            samples.append({
-                "path": str(p),
-                "rows": int(len(df)),
-                "columns": columns,
-                "dtypes": {str(c): str(t) for c, t in df.dtypes.items()},
-                "sample_rows": sample_rows,
-            })
+            samples.append(
+                {
+                    "path": str(p),
+                    "rows": int(len(df)),
+                    "columns": columns,
+                    "dtypes": {str(c): str(t) for c, t in df.dtypes.items()},
+                    "sample_rows": df.head(3).to_dict(orient="records"),
+                }
+            )
         except Exception as exc:
             samples.append({"path": str(p), "error": repr(exc)})
+    return {"count": len(files), "samples": samples, "column_frequency": dict(column_counts)}
 
-    return {
-        "count": len(files),
-        "samples": samples,
-        "column_frequency": dict(column_counts),
+
+def _video_key_from_path(path: Path) -> str:
+    return path.stem
+
+
+def _read_mapping_file(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    rename_map = {str(c).strip().lower(): c for c in df.columns}
+    required = {"n", "pts_time", "fps", "frame_idx"}
+    if not required.issubset(rename_map):
+        raise ValueError(f"{path}: expected mapping columns {sorted(required)}, got {list(df.columns)}")
+    return df.rename(columns={
+        rename_map["n"]: "n",
+        rename_map["pts_time"]: "pts_time",
+        rename_map["fps"]: "fps",
+        rename_map["frame_idx"]: "frame_idx",
+    })
+
+
+def build_manifest(
+    keyframes_dir: Path,
+    clip_dir: Path,
+    mapping_dir: Path,
+    objects_dir: Path,
+    max_rows: int,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    image_rows, image_counts = audit_images(keyframes_dir)
+    frame_rows = pd.DataFrame(image_rows[:max_rows])
+    if frame_rows.empty:
+        return frame_rows, {"errors": ["No keyframes found."], "videos_checked": 0}
+
+    errors: list[str] = []
+    records: list[dict[str, Any]] = []
+    grouped = frame_rows.groupby("video_id", sort=True)
+    clip_files = {p.stem: p for p in iter_files(clip_dir, FEATURE_SUFFIXES)}
+    mapping_files = {p.stem: p for p in iter_files(mapping_dir, CSV_SUFFIXES)}
+
+    for video_id, group in grouped:
+        image_count = len(group)
+        clip_path = clip_files.get(video_id)
+        mapping_path = mapping_files.get(video_id)
+        if clip_path is None:
+            errors.append(f"{video_id}: missing CLIP feature file")
+            continue
+        if mapping_path is None:
+            errors.append(f"{video_id}: missing mapping CSV")
+            continue
+        try:
+            mapping = _read_mapping_file(mapping_path)
+            clip = np.load(clip_path, mmap_mode="r", allow_pickle=False)
+            if clip.ndim != 2:
+                raise ValueError(f"CLIP array ndim={clip.ndim}, expected 2")
+            if clip.shape[0] != image_count:
+                errors.append(f"{video_id}: keyframes={image_count}, mapping={len(mapping)}, clip_rows={clip.shape[0]}")
+            if len(mapping) != image_count:
+                errors.append(f"{video_id}: keyframes={image_count}, mapping_rows={len(mapping)}")
+
+            mapping = mapping.reset_index(drop=True)
+            group = group.sort_values("keyframe_name", key=lambda s: s.str.extract(r"(\\d+)$")[0].astype(int)).reset_index(drop=True)
+            rows = min(len(group), len(mapping), clip.shape[0])
+            for i in range(rows):
+                image_row = group.iloc[i]
+                map_row = mapping.iloc[i]
+                object_path = ""
+                for ext in JSON_SUFFIXES:
+                    candidate = objects_dir / video_id / f"{image_row['keyframe_name']}{ext}"
+                    if candidate.exists():
+                        object_path = str(candidate)
+                        break
+                records.append({
+                    "video_id": video_id,
+                    "keyframe_idx": i,
+                    "keyframe_name": image_row["keyframe_name"],
+                    "image_path": image_row["keyframe_path"],
+                    "original_frame_id": int(map_row["frame_idx"]),
+                    "pts_time": float(map_row["pts_time"]),
+                    "fps": float(map_row["fps"]),
+                    "clip_idx": i,
+                    "clip_path": str(clip_path),
+                    "object_path": object_path,
+                })
+        except Exception as exc:
+            errors.append(f"{video_id}: {exc!r}")
+
+    manifest = pd.DataFrame(records)
+    if not manifest.empty:
+        manifest = manifest.sort_values(["video_id", "keyframe_idx"]).reset_index(drop=True)
+
+    checks = {
+        "videos_checked": int(len(grouped)),
+        "videos_with_manifest": int(manifest["video_id"].nunique()) if not manifest.empty else 0,
+        "keyframes_found": int(len(frame_rows)),
+        "manifest_rows": int(len(manifest)),
+        "object_matches": int((manifest["object_path"] != "").sum()) if not manifest.empty else 0,
+        "errors": errors,
     }
+    return manifest, checks
 
 
 def audit(config_path: str) -> dict[str, Any]:
@@ -120,7 +215,7 @@ def audit(config_path: str) -> dict[str, Any]:
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
     image_rows, counts = audit_images(keyframes_dir)
-    summary = {
+    summary: dict[str, Any] = {
         "keyframes": {
             "total": len(image_rows),
             "videos": len(counts),
@@ -130,19 +225,14 @@ def audit(config_path: str) -> dict[str, Any]:
         "mapping": inspect_mapping_files(mapping_dir),
         "media_info": inspect_json_files(media_info_dir),
         "objects": inspect_json_files(objects_dir) if objects_dir else {"count": 0, "samples": [], "top_level_keys": {}},
-        "notes": [
-            "BTC keyframe mappings are inspected as CSV files.",
-            "The audit recursively scans nested archive wrapper directories.",
-            "Original frame IDs will be normalized after the mapping schema is confirmed.",
-        ],
     }
 
     max_rows = int(cfg.get("audit", {}).get("max_manifest_rows", 5_000_000))
-    manifest = pd.DataFrame(image_rows[:max_rows])
-    if manifest.empty:
-        manifest = pd.DataFrame(columns=["video_id", "keyframe_name", "keyframe_path", "suffix"])
-    manifest.to_csv(artifacts_dir / "dataset_manifest.csv", index=False)
+    manifest, integrity = build_manifest(keyframes_dir, clip_dir, mapping_dir, objects_dir, max_rows)
+    summary["integrity"] = integrity
 
+    manifest.to_csv(artifacts_dir / "dataset_manifest.csv", index=False)
+    manifest.to_parquet(artifacts_dir / "dataset_manifest.parquet", index=False)
     with (artifacts_dir / "dataset_audit.json").open("w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2, default=str)
 
@@ -155,12 +245,17 @@ def audit(config_path: str) -> dict[str, Any]:
         f.write(f"Mapping CSV files: {summary['mapping']['count']}\n")
         f.write(f"Media-info JSON files: {summary['media_info']['count']}\n")
         f.write(f"Object JSON files: {summary['objects']['count']}\n")
+        f.write(f"Manifest rows: {integrity['manifest_rows']:,}\n")
+        f.write(f"Object-path matches: {integrity['object_matches']:,}\n")
+        f.write(f"Integrity errors: {len(integrity['errors'])}\n")
+        for error in integrity["errors"][:100]:
+            f.write(f"- {error}\n")
 
     return summary
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Audit AIC 2026 dataset layout and feature files.")
+    parser = argparse.ArgumentParser(description="Audit and validate AIC 2026 dataset layout.")
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
     print(json.dumps(audit(args.config), ensure_ascii=False, indent=2, default=str))
