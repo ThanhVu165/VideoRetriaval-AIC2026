@@ -1,23 +1,60 @@
 # VideoRetrieval-AIC2026
 
-Pipeline for AIC 2026 Video Retrieval: dataset audit, CLIP retrieval baseline, temporal localization, VQA, TRAKE alignment, ranking, and evaluation.
+AIC 2026 Video Retrieval pipeline: dataset integrity → multimodal candidate retrieval → temporal localization → semantic keyframe alignment → VQA adapter → ranking/top-k output.
 
-## Current milestone: Phase 1 — CLIP Retrieval Baseline
+The implementation is intentionally modular. Competition data and generated artifacts stay outside Git.
 
-The repository intentionally does **not** contain competition data. Put the downloaded ZIP archives outside Git and point the audit/index scripts at the extracted dataset root.
+## Pipeline
 
-Expected components:
+```text
+Natural-language query
+        │
+        ▼
+Query embedding / query adapter
+        │
+        ▼
+CLIP frame retrieval
+        │
+        ▼
+Candidate video generation (Top-N)
+        │
+        ├── object evidence
+        ├── media metadata
+        └── CLIP similarity
+        │
+        ▼
+Multimodal reranking
+        │
+        ▼
+Coarse temporal window
+        │
+        ▼
+Original-video frame decoding
+        │
+        ▼
+Fine temporal scoring / localization
+        │
+        ├── Textual KIS → video + semantic keyframe
+        ├── Q&A        → video + keyframe + VLM answer
+        └── TRAKE      → ordered semantic keyframes
+        │
+        ▼
+Final ranking → Top-k candidate output
+```
+
+## Dataset layout
 
 ```text
 data/
-├── keyframes/
-├── clip/
-├── mapping/
-├── media_info/
-└── objects/
+├── videos/          # official source videos; keep outside Git
+├── keyframes/       # supplied keyframes
+├── clip/            # supplied CLIP features
+├── mapping/         # keyframe → original frame / timestamp mapping
+├── media_info/      # supplied video metadata
+└── objects/         # supplied object detections
 ```
 
-The latest supplied full audit reports 177,321 keyframes across 873 videos, with 873 CLIP feature files, 873 mapping CSVs, 873 media-info JSONs, and 177,321 object JSONs. The project also contains an older partial audit (7,800 keyframes / 29 videos); use the latest full audit when validating the local dataset. fileciteturn23file3
+The unified manifest preserves the distinction between `keyframe_idx` and the original video `frame_id`. This distinction is required for temporal localization and final frame selection.
 
 ## Phase 0 — Dataset integrity
 
@@ -26,21 +63,9 @@ python -m aic2026.audit --config configs/example.yaml
 python -m aic2026.validate --manifest artifacts/dataset_manifest.parquet
 ```
 
-Outputs:
+The manifest joins keyframe images, original `frame_id`, `pts_time`, `fps`, CLIP row, and object JSON path.
 
-```text
-artifacts/
-├── dataset_manifest.csv
-├── dataset_manifest.parquet
-├── dataset_audit.json
-└── audit_report.txt
-```
-
-The manifest joins keyframe images, original video `frame_id`, `pts_time`, `fps`, CLIP row, and object JSON path. The original frame index is kept separate from the keyframe ordinal.
-
-## Phase 1 — CLIP frame retrieval
-
-Build an ordered CLIP matrix from the unified manifest:
+## Phase 1 — CLIP candidate retrieval
 
 ```bash
 python -m aic2026.build_index \
@@ -50,44 +75,62 @@ python -m aic2026.build_index \
   --report artifacts/clip_index_report.json
 ```
 
-Run the retrieval engine from Python:
+`FrameIndex` accepts a precomputed query embedding and supports frame-level retrieval plus video aggregation. NumPy inner-product search is the default; FAISS is optional.
 
-```python
-import numpy as np
-from aic2026.retrieval import FrameIndex
+## Phase 2 — Multimodal reranking
 
-index = FrameIndex.from_files(
-    "artifacts/dataset_manifest.parquet",
-    "artifacts/clip_frames.npy",
-)
-query_embedding = np.load("query_embedding.npy")
+`aic2026.multimodal.MultimodalReranker` fuses:
 
-frames = index.search_frames(query_embedding, top_k=100)
-videos = index.search_videos(
-    query_embedding,
-    top_k_frames=200,
-    top_k_videos=100,
-    aggregation="max",
-)
+- CLIP similarity — primary signal
+- object-detection JSON evidence — auxiliary signal
+- media-info text — auxiliary signal
+
+The fixed weighted fusion is deliberately isolated so it can later be replaced by a learned reranker without changing the pipeline interface.
+
+## Phase 3 — Temporal localization
+
+`aic2026.video` probes the official source video and decodes **original frame IDs**. `aic2026.temporal` groups sparse evidence into candidate windows and refines the semantic frame. `aic2026.pipeline.AICPipeline` connects candidate retrieval to source-video temporal decoding.
+
+A frame scorer can be injected as an adapter. This is where a stronger CLIP/VLM/video encoder should be attached for fine-grained localization, especially when the correct event occupies only a few frames.
+
+## Phase 4 — TRAKE alignment
+
+`aic2026.alignment.monotonic_event_alignment` solves ordered event-to-frame assignment with dynamic programming. It enforces temporal monotonicity and supports a minimum frame separation between events.
+
+This gives the core alignment primitive for:
+
+```text
+Event 1 → keyframe 1
+Event 2 → keyframe 2
+...
+Event N → keyframe N
 ```
 
-The retrieval engine deliberately accepts a **precomputed query embedding**. This avoids silently assuming an unofficial query-file format or text-encoder checkpoint. The official query/ground-truth package must be inspected before implementing the AIC evaluator and submission writer.
+## Phase 5 — Q&A
 
-FAISS is an optional backend; the default implementation uses normalized NumPy inner-product search. No FAISS dependency is required for the baseline.
+`aic2026.vqa` defines a model-agnostic `VLMAnswerer` adapter. The pipeline does not hard-code a VLM checkpoint or an unofficial query format; a local VLM can be plugged into the adapter once the intended inference model is selected.
 
-### What Phase 1 does and does not claim
+## Phase 6 — Ranking / Top-k
 
-Phase 1 is a **candidate-generation baseline**, not the official AIC evaluator. It provides frame retrieval, video aggregation, and preservation of the original `frame_id`. The official scoring implementation will be added only after the BTC query/ground-truth/submission specification is available in the project sources.
+`aic2026.ranking` keeps retrieval, temporal and multimodal evidence separate and produces a final `rank_score`. `top_k_submission()` provides deterministic Top-k candidate selection without pretending to implement an official BTC submission schema that has not been supplied to the repository.
 
-## Roadmap
+## Current implementation status
 
-1. Phase 0 — dataset integrity and unified manifest
-2. Phase 1 — CLIP retrieval baseline
-3. Official evaluator — implement only from BTC/AIC query, ground-truth and submission specification
-4. Phase 2 — multimodal reranking with objects/metadata
-5. Phase 3 — coarse-to-fine temporal localization
-6. Phase 4 — TRAKE semantic keyframe alignment
-7. Phase 5 — Q&A/VLM answer extraction
-8. Phase 6 — Top-100 ranking optimization and submission pipeline
+Implemented in the active development branch:
 
-Competition data, embeddings, archives, and generated artifacts should not be committed to Git. See `.gitignore`.
+- dataset audit and unified manifest
+- CLIP frame index and video candidate generation
+- source-video probing and frame decoding
+- temporal window grouping/refinement
+- multimodal auxiliary reranking
+- coarse-to-fine pipeline orchestration
+- TRAKE monotonic semantic keyframe alignment
+- VQA model adapter contract
+- final candidate ranking and Top-k selection
+- unit tests for retrieval, temporal processing, alignment and ranking
+
+The next model-level improvements should plug into these interfaces rather than redesign the data flow: stronger query encoding, learned multimodal reranking, dense frame scoring for fine temporal localization, and a selected VLM for Q&A.
+
+## Development
+
+Competition data, embeddings, archives and generated artifacts must not be committed to Git. See `.gitignore`.
