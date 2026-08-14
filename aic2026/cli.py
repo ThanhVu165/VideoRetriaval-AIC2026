@@ -15,9 +15,16 @@ def main() -> None:
     video.add_argument("--video-dir", type=Path, required=True)
     video.add_argument("--output", type=Path, required=True)
 
+    build_index = sub.add_parser("build-index", help="Build a persistent FAISS frame index")
+    build_index.add_argument("--manifest", type=Path, required=True)
+    build_index.add_argument("--embeddings", type=Path, required=True)
+    build_index.add_argument("--output-index", type=Path, required=True)
+    build_index.add_argument("--metadata-output", type=Path)
+
     retrieve = sub.add_parser("retrieve", help="Run CLIP retrieval + temporal localization")
     retrieve.add_argument("--manifest", type=Path, required=True)
     retrieve.add_argument("--embeddings", type=Path, required=True)
+    retrieve.add_argument("--faiss-index", type=Path)
     retrieve.add_argument("--videos-dir", type=Path, required=True)
     retrieve.add_argument("--query", required=True)
     retrieve.add_argument("--query-embedding", type=Path, required=True)
@@ -35,11 +42,26 @@ def main() -> None:
         print(json.dumps(report, indent=2))
         return
 
+    if args.command == "build-index":
+        from .index_builder import build_faiss_index
+
+        report = build_faiss_index(
+            args.manifest,
+            args.embeddings,
+            args.output_index,
+            metadata_output=args.metadata_output,
+        )
+        print(json.dumps(report, indent=2))
+        return
+
     if args.command == "retrieve":
         from .pipeline import AICPipeline
         from .retrieval import FrameIndex
 
-        index = FrameIndex.from_files(args.manifest, args.embeddings)
+        if args.faiss_index:
+            index = FrameIndex.from_persisted_faiss(args.manifest, args.embeddings, args.faiss_index)
+        else:
+            index = FrameIndex.from_files(args.manifest, args.embeddings)
         query_embedding = np.load(args.query_embedding, allow_pickle=False)
         pipeline = AICPipeline(index, args.videos_dir, media_info_dir=args.media_info_dir)
         result = pipeline.run(
