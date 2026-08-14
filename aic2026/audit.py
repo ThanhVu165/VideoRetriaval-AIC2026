@@ -13,6 +13,7 @@ import yaml
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 JSON_SUFFIXES = {".json"}
 FEATURE_SUFFIXES = {".npy", ".npz"}
+CSV_SUFFIXES = {".csv"}
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -79,6 +80,35 @@ def inspect_json_files(root: Path) -> dict[str, Any]:
     return {"count": len(files), "samples": samples, "top_level_keys": dict(top_keys)}
 
 
+def inspect_mapping_files(root: Path) -> dict[str, Any]:
+    """Inspect BTC keyframe mapping CSVs without assuming their column names."""
+    files = list(iter_files(root, CSV_SUFFIXES)) if root.exists() else []
+    column_counts: Counter = Counter()
+    samples: list[dict[str, Any]] = []
+
+    for p in files[:10]:
+        try:
+            df = pd.read_csv(p)
+            columns = [str(c) for c in df.columns]
+            column_counts.update(columns)
+            sample_rows = df.head(3).to_dict(orient="records")
+            samples.append({
+                "path": str(p),
+                "rows": int(len(df)),
+                "columns": columns,
+                "dtypes": {str(c): str(t) for c, t in df.dtypes.items()},
+                "sample_rows": sample_rows,
+            })
+        except Exception as exc:
+            samples.append({"path": str(p), "error": repr(exc)})
+
+    return {
+        "count": len(files),
+        "samples": samples,
+        "column_frequency": dict(column_counts),
+    }
+
+
 def audit(config_path: str) -> dict[str, Any]:
     cfg = load_config(Path(config_path))
     keyframes_dir = Path(cfg["keyframes_dir"])
@@ -97,12 +127,13 @@ def audit(config_path: str) -> dict[str, Any]:
             "top_videos_by_keyframes": counts.most_common(20),
         },
         "clip_features": inspect_feature_files(clip_dir),
-        "mapping": inspect_json_files(mapping_dir),
+        "mapping": inspect_mapping_files(mapping_dir),
         "media_info": inspect_json_files(media_info_dir),
         "objects": inspect_json_files(objects_dir) if objects_dir else {"count": 0, "samples": [], "top_level_keys": {}},
         "notes": [
-            "Phase 0 audit records the supplied structures without assuming an unverified mapping schema.",
-            "Original frame IDs will be added after the mapping archive format is inspected.",
+            "BTC keyframe mappings are inspected as CSV files.",
+            "The audit recursively scans nested archive wrapper directories.",
+            "Original frame IDs will be normalized after the mapping schema is confirmed.",
         ],
     }
 
@@ -113,7 +144,7 @@ def audit(config_path: str) -> dict[str, Any]:
     manifest.to_csv(artifacts_dir / "dataset_manifest.csv", index=False)
 
     with (artifacts_dir / "dataset_audit.json").open("w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
+        json.dump(summary, f, ensure_ascii=False, indent=2, default=str)
 
     with (artifacts_dir / "audit_report.txt").open("w", encoding="utf-8") as f:
         f.write("AIC 2026 Dataset Audit\n")
@@ -121,7 +152,7 @@ def audit(config_path: str) -> dict[str, Any]:
         f.write(f"Total keyframes: {len(image_rows):,}\n")
         f.write(f"Videos represented by keyframes: {len(counts):,}\n")
         f.write(f"CLIP feature files: {len(summary['clip_features'])}\n")
-        f.write(f"Mapping JSON files: {summary['mapping']['count']}\n")
+        f.write(f"Mapping CSV files: {summary['mapping']['count']}\n")
         f.write(f"Media-info JSON files: {summary['media_info']['count']}\n")
         f.write(f"Object JSON files: {summary['objects']['count']}\n")
 
@@ -132,7 +163,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Audit AIC 2026 dataset layout and feature files.")
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
-    print(json.dumps(audit(args.config), ensure_ascii=False, indent=2))
+    print(json.dumps(audit(args.config), ensure_ascii=False, indent=2, default=str))
 
 
 if __name__ == "__main__":
