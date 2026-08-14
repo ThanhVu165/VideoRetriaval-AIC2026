@@ -24,7 +24,8 @@ def main() -> None:
     retrieve.add_argument("--output", type=Path, required=True)
     retrieve.add_argument("--media-info-dir", type=Path)
     retrieve.add_argument("--top-k", type=int, default=100)
-    retrieve.add_argument("--radius-frames", type=int, default=15)
+    retrieve.add_argument("--radius-frames", type=int, default=24)
+    retrieve.add_argument("--max-decode-frames", type=int, default=96)
 
     args = parser.parse_args()
     if args.command == "video-manifest":
@@ -46,6 +47,7 @@ def main() -> None:
             query_embedding,
             top_k=args.top_k,
             radius_frames=args.radius_frames,
+            max_decode_frames=args.max_decode_frames,
         )
         pipeline.write_candidates(result, args.output, top_k=args.top_k)
         print(json.dumps({"rows": len(result), "output": str(args.output)}, indent=2))
