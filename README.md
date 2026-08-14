@@ -2,7 +2,7 @@
 
 AIC 2026 Video Retrieval pipeline: dataset integrity → multimodal candidate retrieval → temporal localization → semantic keyframe alignment → VQA adapter → ranking/top-k output.
 
-The implementation is intentionally modular. Competition data and generated artifacts stay outside Git.
+The implementation is modular. Competition data and generated artifacts stay outside Git.
 
 ## Pipeline
 
@@ -10,7 +10,7 @@ The implementation is intentionally modular. Competition data and generated arti
 Natural-language query
         │
         ▼
-Query embedding / query adapter
+Query embedding / OpenCLIP adapter
         │
         ▼
 CLIP frame retrieval
@@ -32,7 +32,10 @@ Coarse temporal window
 Original-video frame decoding
         │
         ▼
-Fine temporal scoring / localization
+Fine frame scoring
+        │
+        ▼
+Temporal event scoring + semantic peak frame
         │
         ├── Textual KIS → video + semantic keyframe
         ├── Q&A        → video + keyframe + VLM answer
@@ -85,19 +88,19 @@ python -m aic2026.build_index \
 - object-detection JSON evidence — auxiliary signal
 - media-info text — auxiliary signal
 
-The fixed weighted fusion is deliberately isolated so it can later be replaced by a learned reranker without changing the pipeline interface.
+The fixed weighted fusion is isolated so it can later be replaced by a learned reranker without changing the pipeline interface.
 
-## Phase 3 — Temporal localization
+## Phase 3 — Fine temporal localization
 
-`aic2026.video` probes the official source video and decodes **original frame IDs**. `aic2026.temporal` groups sparse evidence into candidate windows and refines the semantic frame. `aic2026.pipeline.AICPipeline` connects candidate retrieval to source-video temporal decoding.
+`aic2026.video` probes the official source video and decodes **original frame IDs**. `aic2026.pipeline.AICPipeline` retrieves a coarse candidate, decodes a local frame window, optionally applies a dense frame scorer, selects the peak semantic frame, groups temporally adjacent evidence and computes a local event score.
 
-A frame scorer can be injected as an adapter. This is where a stronger CLIP/VLM/video encoder should be attached for fine-grained localization, especially when the correct event occupies only a few frames.
+`aic2026.clip_runtime.OpenCLIPRuntime` provides an optional PyTorch/OpenCLIP adapter for query encoding and dense frame scoring. The checkpoint remains configurable; the exact compatible ViT-B/32 checkpoint should be used when reproducing supplied BTC CLIP features.
+
+The fine scorer is deliberately injected through an adapter so a stronger video-language encoder can replace CLIP without changing retrieval or output contracts.
 
 ## Phase 4 — TRAKE alignment
 
 `aic2026.alignment.monotonic_event_alignment` solves ordered event-to-frame assignment with dynamic programming. It enforces temporal monotonicity and supports a minimum frame separation between events.
-
-This gives the core alignment primitive for:
 
 ```text
 Event 1 → keyframe 1
@@ -108,11 +111,30 @@ Event N → keyframe N
 
 ## Phase 5 — Q&A
 
-`aic2026.vqa` defines a model-agnostic `VLMAnswerer` adapter. The pipeline does not hard-code a VLM checkpoint or an unofficial query format; a local VLM can be plugged into the adapter once the intended inference model is selected.
+`aic2026.vqa` defines a model-agnostic `VLMAnswerer` adapter. A selected local VLM can be connected once the inference checkpoint and official query format are fixed.
 
 ## Phase 6 — Ranking / Top-k
 
-`aic2026.ranking` keeps retrieval, temporal and multimodal evidence separate and produces a final `rank_score`. `top_k_submission()` provides deterministic Top-k candidate selection without pretending to implement an official BTC submission schema that has not been supplied to the repository.
+`aic2026.ranking` keeps retrieval, temporal and multimodal evidence separate and produces a final `rank_score`. `top_k_submission()` provides deterministic Top-k candidate selection without claiming to implement an official BTC submission schema that has not been supplied to the repository.
+
+## End-to-end execution
+
+With a precomputed query embedding:
+
+```bash
+python -m aic2026 retrieve \
+  --manifest artifacts/dataset_manifest.parquet \
+  --embeddings artifacts/clip_frames.npy \
+  --videos-dir data/videos \
+  --query "a person enters a room" \
+  --query-embedding artifacts/query_embedding.npy \
+  --output artifacts/results.json \
+  --top-k 100 \
+  --radius-frames 24 \
+  --max-decode-frames 96
+```
+
+For model-backed inference, use `aic2026.inference` with `OpenCLIPRuntime`; the lightweight core requirements intentionally do not force PyTorch/OpenCLIP installation.
 
 ## Current implementation status
 
@@ -120,16 +142,19 @@ Implemented in the active development branch:
 
 - dataset audit and unified manifest
 - CLIP frame index and video candidate generation
-- source-video probing and frame decoding
+- source-video probing and exact original-frame decoding
 - temporal window grouping/refinement
 - multimodal auxiliary reranking
 - coarse-to-fine pipeline orchestration
+- dense fine-frame scoring adapter
+- temporal event scoring and semantic peak-frame selection
+- optional OpenCLIP query/frame runtime
 - TRAKE monotonic semantic keyframe alignment
 - VQA model adapter contract
-- final candidate ranking and Top-k selection
-- unit tests for retrieval, temporal processing, alignment and ranking
+- final candidate ranking and deterministic Top-k selection
+- unit tests for retrieval, temporal processing, alignment, ranking and fine scoring
 
-The next model-level improvements should plug into these interfaces rather than redesign the data flow: stronger query encoding, learned multimodal reranking, dense frame scoring for fine temporal localization, and a selected VLM for Q&A.
+The next research layer is learned reranking and a stronger temporal/video-language scorer; these should plug into the existing interfaces rather than redesign the data flow.
 
 ## Development
 
