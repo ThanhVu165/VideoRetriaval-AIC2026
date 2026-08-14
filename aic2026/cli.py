@@ -15,6 +15,16 @@ def main() -> None:
     video.add_argument("--video-dir", type=Path, required=True)
     video.add_argument("--output", type=Path, required=True)
 
+    dataset_index = sub.add_parser(
+        "dataset-index", help="Build a row-aligned unified CLIP/keyframe/mapping dataset index"
+    )
+    dataset_index.add_argument("--clip-dir", type=Path, required=True)
+    dataset_index.add_argument("--mapping-dir", type=Path, required=True)
+    dataset_index.add_argument("--keyframes-dir", type=Path, required=True)
+    dataset_index.add_argument("--output-manifest", type=Path, required=True)
+    dataset_index.add_argument("--output-embeddings", type=Path, required=True)
+    dataset_index.add_argument("--report-output", type=Path)
+
     build_index = sub.add_parser("build-index", help="Build a persistent FAISS frame index")
     build_index.add_argument("--manifest", type=Path, required=True)
     build_index.add_argument("--embeddings", type=Path, required=True)
@@ -39,6 +49,20 @@ def main() -> None:
         from .video_manifest import build_manifest
 
         report = build_manifest(args.video_dir, args.output, ("mp4", "mkv", "mov", "webm"))
+        print(json.dumps(report, indent=2))
+        return
+
+    if args.command == "dataset-index":
+        from .dataset_index import build_unified_dataset
+
+        report = build_unified_dataset(
+            clip_dir=args.clip_dir,
+            mapping_dir=args.mapping_dir,
+            keyframes_dir=args.keyframes_dir,
+            output_manifest=args.output_manifest,
+            output_embeddings=args.output_embeddings,
+            report_output=args.report_output,
+        )
         print(json.dumps(report, indent=2))
         return
 
