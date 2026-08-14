@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 from collections import Counter
 from pathlib import Path
@@ -106,22 +105,29 @@ def inspect_mapping_files(root: Path) -> dict[str, Any]:
     return {"count": len(files), "samples": samples, "column_frequency": dict(column_counts)}
 
 
-def _video_key_from_path(path: Path) -> str:
-    return path.stem
-
-
 def _read_mapping_file(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
     rename_map = {str(c).strip().lower(): c for c in df.columns}
     required = {"n", "pts_time", "fps", "frame_idx"}
     if not required.issubset(rename_map):
-        raise ValueError(f"{path}: expected mapping columns {sorted(required)}, got {list(df.columns)}")
-    return df.rename(columns={
-        rename_map["n"]: "n",
-        rename_map["pts_time"]: "pts_time",
-        rename_map["fps"]: "fps",
-        rename_map["frame_idx"]: "frame_idx",
-    })
+        raise ValueError(
+            f"{path}: expected mapping columns {sorted(required)}, got {list(df.columns)}"
+        )
+    return df.rename(
+        columns={
+            rename_map["n"]: "n",
+            rename_map["pts_time"]: "pts_time",
+            rename_map["fps"]: "fps",
+            rename_map["frame_idx"]: "frame_idx",
+        }
+    )
+
+
+def _numeric_keyframe_order(series: pd.Series) -> pd.Series:
+    extracted = series.astype(str).str.extract(r"(\d+)$", expand=False)
+    if extracted.isna().any():
+        raise ValueError("Found keyframe names without a trailing numeric index")
+    return extracted.astype(int)
 
 
 def build_manifest(
@@ -131,7 +137,7 @@ def build_manifest(
     objects_dir: Path,
     max_rows: int,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    image_rows, image_counts = audit_images(keyframes_dir)
+    image_rows, _ = audit_images(keyframes_dir)
     frame_rows = pd.DataFrame(image_rows[:max_rows])
     if frame_rows.empty:
         return frame_rows, {"errors": ["No keyframes found."], "videos_checked": 0}
@@ -153,39 +159,54 @@ def build_manifest(
             errors.append(f"{video_id}: missing mapping CSV")
             continue
         try:
-            mapping = _read_mapping_file(mapping_path)
+            mapping = _read_mapping_file(mapping_path).reset_index(drop=True)
             clip = np.load(clip_path, mmap_mode="r", allow_pickle=False)
             if clip.ndim != 2:
                 raise ValueError(f"CLIP array ndim={clip.ndim}, expected 2")
-            if clip.shape[0] != image_count:
-                errors.append(f"{video_id}: keyframes={image_count}, mapping={len(mapping)}, clip_rows={clip.shape[0]}")
-            if len(mapping) != image_count:
-                errors.append(f"{video_id}: keyframes={image_count}, mapping_rows={len(mapping)}")
+            if clip.shape[0] != image_count or len(mapping) != image_count:
+                errors.append(
+                    f"{video_id}: keyframes={image_count}, mapping_rows={len(mapping)}, clip_rows={clip.shape[0]}"
+                )
 
-            mapping = mapping.reset_index(drop=True)
-            group = group.sort_values("keyframe_name", key=lambda s: s.str.extract(r"(\\d+)$")[0].astype(int)).reset_index(drop=True)
+            group = group.sort_values("keyframe_name", key=_numeric_keyframe_order).reset_index(drop=True)
             rows = min(len(group), len(mapping), clip.shape[0])
+
+            mapping_n = pd.to_numeric(mapping["n"], errors="coerce")
+            mapping_frame = pd.to_numeric(mapping["frame_idx"], errors="coerce")
+            mapping_time = pd.to_numeric(mapping["pts_time"], errors="coerce")
+            mapping_fps = pd.to_numeric(mapping["fps"], errors="coerce")
+            if mapping_n.isna().any() or mapping_frame.isna().any() or mapping_time.isna().any() or mapping_fps.isna().any():
+                errors.append(f"{video_id}: mapping contains non-numeric values")
+
+            if rows > 1:
+                if (mapping_frame.iloc[:rows].diff().dropna() < 0).any():
+                    errors.append(f"{video_id}: frame_idx is not monotonic")
+                if (mapping_time.iloc[:rows].diff().dropna() < 0).any():
+                    errors.append(f"{video_id}: pts_time is not monotonic")
+
             for i in range(rows):
                 image_row = group.iloc[i]
                 map_row = mapping.iloc[i]
                 object_path = ""
-                for ext in JSON_SUFFIXES:
-                    candidate = objects_dir / video_id / f"{image_row['keyframe_name']}{ext}"
+                if objects_dir.exists():
+                    candidate = objects_dir / video_id / f"{image_row['keyframe_name']}.json"
                     if candidate.exists():
                         object_path = str(candidate)
-                        break
-                records.append({
-                    "video_id": video_id,
-                    "keyframe_idx": i,
-                    "keyframe_name": image_row["keyframe_name"],
-                    "image_path": image_row["keyframe_path"],
-                    "original_frame_id": int(map_row["frame_idx"]),
-                    "pts_time": float(map_row["pts_time"]),
-                    "fps": float(map_row["fps"]),
-                    "clip_idx": i,
-                    "clip_path": str(clip_path),
-                    "object_path": object_path,
-                })
+
+                records.append(
+                    {
+                        "video_id": video_id,
+                        "keyframe_idx": i,
+                        "keyframe_name": image_row["keyframe_name"],
+                        "image_path": image_row["keyframe_path"],
+                        "original_frame_id": int(map_row["frame_idx"]),
+                        "pts_time": float(map_row["pts_time"]),
+                        "fps": float(map_row["fps"]),
+                        "clip_idx": i,
+                        "clip_path": str(clip_path),
+                        "object_path": object_path,
+                    }
+                )
         except Exception as exc:
             errors.append(f"{video_id}: {exc!r}")
 
