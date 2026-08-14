@@ -1,0 +1,101 @@
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import numpy as np
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="aic2026")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    video = sub.add_parser("video-manifest", help="Probe source videos and build a manifest")
+    video.add_argument("--video-dir", type=Path, required=True)
+    video.add_argument("--output", type=Path, required=True)
+
+    dataset = sub.add_parser("dataset-index", help="Build a unified BTC CLIP/keyframe/mapping index")
+    dataset.add_argument("--clip-dir", type=Path, required=True)
+    dataset.add_argument("--mapping-dir", type=Path, required=True)
+    dataset.add_argument("--keyframes-dir", type=Path, required=True)
+    dataset.add_argument("--output-manifest", type=Path, required=True)
+    dataset.add_argument("--output-embeddings", type=Path, required=True)
+    dataset.add_argument("--report-output", type=Path)
+
+    build_index = sub.add_parser("build-index", help="Build a persistent FAISS frame index")
+    build_index.add_argument("--manifest", type=Path, required=True)
+    build_index.add_argument("--embeddings", type=Path, required=True)
+    build_index.add_argument("--output-index", type=Path, required=True)
+    build_index.add_argument("--metadata-output", type=Path)
+
+    retrieve = sub.add_parser("retrieve", help="Run CLIP retrieval + temporal localization")
+    retrieve.add_argument("--manifest", type=Path, required=True)
+    retrieve.add_argument("--embeddings", type=Path, required=True)
+    retrieve.add_argument("--faiss-index", type=Path)
+    retrieve.add_argument("--videos-dir", type=Path, required=True)
+    retrieve.add_argument("--query", required=True)
+    retrieve.add_argument("--query-embedding", type=Path, required=True)
+    retrieve.add_argument("--output", type=Path, required=True)
+    retrieve.add_argument("--media-info-dir", type=Path)
+    retrieve.add_argument("--top-k", type=int, default=100)
+    retrieve.add_argument("--radius-frames", type=int, default=24)
+    retrieve.add_argument("--max-decode-frames", type=int, default=96)
+
+    args = parser.parse_args()
+    if args.command == "video-manifest":
+        from .video_manifest import build_manifest
+
+        report = build_manifest(args.video_dir, args.output, ("mp4", "mkv", "mov", "webm"))
+        print(json.dumps(report, indent=2))
+        return
+
+    if args.command == "dataset-index":
+        from .dataset_index import build_unified_dataset
+
+        report = build_unified_dataset(
+            args.clip_dir,
+            args.mapping_dir,
+            args.keyframes_dir,
+            args.output_manifest,
+            args.output_embeddings,
+            report_output=args.report_output,
+        )
+        print(json.dumps(report, indent=2))
+        return
+
+    if args.command == "build-index":
+        from .index_builder import build_faiss_index
+
+        report = build_faiss_index(
+            args.manifest,
+            args.embeddings,
+            args.output_index,
+            metadata_output=args.metadata_output,
+        )
+        print(json.dumps(report, indent=2))
+        return
+
+    if args.command == "retrieve":
+        from .pipeline import AICPipeline
+        from .retrieval import FrameIndex
+
+        if args.faiss_index:
+            index = FrameIndex.from_persisted_faiss(args.manifest, args.embeddings, args.faiss_index)
+        else:
+            index = FrameIndex.from_files(args.manifest, args.embeddings)
+        query_embedding = np.load(args.query_embedding, allow_pickle=False)
+        pipeline = AICPipeline(index, args.videos_dir, media_info_dir=args.media_info_dir)
+        result = pipeline.run(
+            args.query,
+            query_embedding,
+            top_k=args.top_k,
+            radius_frames=args.radius_frames,
+            max_decode_frames=args.max_decode_frames,
+        )
+        pipeline.write_candidates(result, args.output, top_k=args.top_k)
+        print(json.dumps({"rows": len(result), "output": str(args.output)}, indent=2))
+
+
+if __name__ == "__main__":
+    main()
