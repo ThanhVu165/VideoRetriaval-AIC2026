@@ -47,7 +47,6 @@ class EvidenceConfig:
     video_column: str | None = None
     frame_column: str | None = None
     text_column: str | None = None
-    time_column: str | None = None
 
 
 class EvidenceStore:
@@ -73,7 +72,6 @@ class SQLiteEvidenceStore(EvidenceStore):
         self.video_column: str | None = None
         self.frame_column: str | None = None
         self.text_column: str | None = None
-        self.time_column: str | None = None
         self._ready = False
         self._prepare()
 
@@ -89,9 +87,7 @@ class SQLiteEvidenceStore(EvidenceStore):
                 tables = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")]
                 if not tables:
                     return
-                table = self.config.table
-                if table not in tables:
-                    table = None
+                table = self.config.table if self.config.table in tables else None
                 for candidate in ([table] if table else tables):
                     if not candidate:
                         continue
@@ -106,23 +102,15 @@ class SQLiteEvidenceStore(EvidenceStore):
                     text = self.config.text_column or _pick(
                         columns, ("text", "transcript", "asr", "ocr", "caption", "content", "value", "description")
                     )
-                    time_col = self.config.time_column or _pick(
-                        columns, ("pts_time", "timestamp", "time", "start_time")
-                    )
                     if video and text:
                         self.table = candidate
                         self.video_column = video
                         self.frame_column = frame
                         self.text_column = text
-                        self.time_column = time_col
                         self._ready = True
                         return
         except (OSError, sqlite3.Error):
             return
-
-    @staticmethod
-    def _norm_id(value: object) -> str:
-        return str(value)
 
     def score_candidates(self, query: str, rows: pd.DataFrame) -> list[float]:
         if rows.empty or not self._ready:
@@ -131,35 +119,29 @@ class SQLiteEvidenceStore(EvidenceStore):
         scores: list[float] = []
         try:
             with sqlite3.connect(f"file:{self.path.as_posix()}?mode=ro", uri=True) as con:
-                qcols = f'"{self.video_column}", "{self.text_column}"'
+                qcols = [f'"{self.video_column}"', f'"{self.text_column}"']
                 if self.frame_column:
-                    qcols += f', "{self.frame_column}"'
-                if self.time_column:
-                    qcols += f', "{self.time_column}"'
-                sql = f'SELECT {qcols} FROM "{self.table}" WHERE "{self.video_column}" = ?'
-                cache: dict[str, list[tuple[str, object, object | None, object | None]]] = {}
+                    qcols.append(f'"{self.frame_column}"')
+                sql = f'SELECT {", ".join(qcols)} FROM "{self.table}" WHERE "{self.video_column}" = ?'
+                cache: dict[str, list[tuple[str, object | None]]] = {}
                 for _, row in rows.iterrows():
-                    video_id = self._norm_id(row["video_id"])
+                    video_id = str(row["video_id"])
                     if video_id not in cache:
                         try:
                             raw = con.execute(sql, (video_id,)).fetchall()
                         except sqlite3.Error:
                             raw = []
                         cache[video_id] = [
-                            (str(r[1] or ""), r[2] if self.frame_column else None, r[3] if self.time_column else None)
-                            for r in raw
+                            (str(item[1] or ""), item[2] if self.frame_column else None)
+                            for item in raw
                         ]
-                    evidence = cache[video_id]
                     target_frame = row.get("best_frame_id", row.get("original_frame_id", None))
                     best = 0.0
-                    for text, frame_id, timestamp in evidence:
+                    for text, frame_id in cache[video_id]:
                         score = lexical_overlap(query, text)
                         if frame_id is not None and target_frame is not None:
                             try:
-                                distance = abs(int(frame_id) - int(target_frame))
-                                if distance <= 30:
-                                    score *= 1.0
-                                else:
+                                if abs(int(frame_id) - int(target_frame)) > 30:
                                     score *= 0.5
                             except (TypeError, ValueError):
                                 pass
