@@ -169,13 +169,37 @@ class AICPipeline:
         return LocalizedEvent(video_id, coarse, start, end, semantic, temporal_event_score(observed_ids, scores, self.temporal_config))
 
     def run(self, query: str, query_embedding: np.ndarray, top_k: int = 100, frame_scorer: FrameScorer | None = None, radius_frames: int = 24, max_decode_frames: int = 96) -> pd.DataFrame:
-        candidates = self.retrieve(query, query_embedding, top_k_frames=max(top_k * 10, 1000), top_k_videos=min(max(top_k * 2, 100), 500), per_video_k=5)
+        # Retrieval needs a broad frame pool, but temporal decoding should only
+        # inspect a smaller candidate-video set. This avoids decoding hundreds
+        # of source videos for every query.
+        top_k_frames = max(top_k * 10, 1000)
+        top_k_videos = min(max(top_k, 20), 100)
+        candidates = self.retrieve(
+            query,
+            query_embedding,
+            top_k_frames=top_k_frames,
+            top_k_videos=top_k_videos,
+            per_video_k=5,
+        )
         if candidates.empty:
             return candidates
         events: list[dict[str, object]] = []
         for _, candidate in candidates.iterrows():
-            event = self.localize(candidate, frame_scorer=frame_scorer, radius_frames=radius_frames, max_decode_frames=max_decode_frames)
-            events.append({**candidate.to_dict(), "temporal_start_frame": event.start_frame, "temporal_end_frame": event.end_frame, "semantic_keyframe": event.semantic_keyframe, "temporal_score": event.score})
+            event = self.localize(
+                candidate,
+                frame_scorer=frame_scorer,
+                radius_frames=radius_frames,
+                max_decode_frames=max_decode_frames,
+            )
+            events.append(
+                {
+                    **candidate.to_dict(),
+                    "temporal_start_frame": event.start_frame,
+                    "temporal_end_frame": event.end_frame,
+                    "semantic_keyframe": event.semantic_keyframe,
+                    "temporal_score": event.score,
+                }
+            )
         result = pd.DataFrame(events)
         return rerank_candidates(result, self.ranking_weights).head(top_k).reset_index(drop=True)
 
