@@ -31,7 +31,7 @@ def main() -> None:
     build_index.add_argument("--output-index", type=Path, required=True)
     build_index.add_argument("--metadata-output", type=Path)
 
-    retrieve = sub.add_parser("retrieve", help="Run CLIP retrieval + temporal localization")
+    retrieve = sub.add_parser("retrieve", help="Run CLIP retrieval + optional multimodal evidence + temporal localization")
     retrieve.add_argument("--manifest", type=Path, required=True)
     retrieve.add_argument("--embeddings", type=Path, required=True)
     retrieve.add_argument("--faiss-index", type=Path)
@@ -43,6 +43,10 @@ def main() -> None:
     retrieve.add_argument("--device", default="cpu")
     retrieve.add_argument("--output", type=Path, required=True)
     retrieve.add_argument("--media-info-dir", type=Path)
+    retrieve.add_argument("--asr-db", type=Path, help="Optional ASR SQLite artifact")
+    retrieve.add_argument("--ocr-db", type=Path, help="Optional OCR SQLite artifact")
+    retrieve.add_argument("--caption-db", type=Path, help="Optional caption SQLite artifact")
+    retrieve.add_argument("--evidence-rrf-k", type=int, default=60)
     retrieve.add_argument("--top-k", type=int, default=100)
     retrieve.add_argument("--radius-frames", type=int, default=24)
     retrieve.add_argument("--max-decode-frames", type=int, default=96)
@@ -143,6 +147,7 @@ def main() -> None:
         return
 
     if args.command == "retrieve":
+        from .evidence import SQLiteEvidenceStore
         from .pipeline import AICPipeline
         from .retrieval import FrameIndex
 
@@ -163,7 +168,21 @@ def main() -> None:
             )
             query_embedding = encoder.encode_one(args.query)
 
-        pipeline = AICPipeline(index, args.videos_dir, media_info_dir=args.media_info_dir)
+        stores = []
+        if args.asr_db:
+            stores.append(SQLiteEvidenceStore(args.asr_db, "asr"))
+        if args.ocr_db:
+            stores.append(SQLiteEvidenceStore(args.ocr_db, "ocr"))
+        if args.caption_db:
+            stores.append(SQLiteEvidenceStore(args.caption_db, "caption"))
+
+        pipeline = AICPipeline(
+            index,
+            args.videos_dir,
+            media_info_dir=args.media_info_dir,
+            evidence_stores=stores,
+            evidence_rrf_k=args.evidence_rrf_k,
+        )
         result = pipeline.run(
             args.query,
             query_embedding,
@@ -172,7 +191,18 @@ def main() -> None:
             max_decode_frames=args.max_decode_frames,
         )
         pipeline.write_candidates(result, args.output, top_k=args.top_k)
-        print(json.dumps({"rows": len(result), "output": str(args.output)}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "rows": len(result),
+                    "output": str(args.output),
+                    "evidence_modalities": [s.name for s in stores if s.available],
+                    "evidence_requested": [s.name for s in stores],
+                    "evidence_rrf_k": args.evidence_rrf_k,
+                },
+                indent=2,
+            )
+        )
 
 
 if __name__ == "__main__":
