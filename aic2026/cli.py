@@ -65,6 +65,14 @@ def main() -> None:
     benchmark.add_argument("--max-decode-frames", type=int, default=96)
     benchmark.add_argument("--frame-tolerance", type=int, default=10)
 
+    gt_template = sub.add_parser(
+        "ground-truth-template",
+        help="Create an annotation template from the official query spreadsheet",
+    )
+    gt_template.add_argument("--queries", type=Path, required=True)
+    gt_template.add_argument("--query-column", default="Description")
+    gt_template.add_argument("--output", type=Path, required=True)
+
     args = parser.parse_args()
     if args.command == "video-manifest":
         from .video_manifest import build_manifest
@@ -95,6 +103,17 @@ def main() -> None:
             args.embeddings,
             args.output_index,
             metadata_output=args.metadata_output,
+        )
+        print(json.dumps(report, indent=2))
+        return
+
+    if args.command == "ground-truth-template":
+        from .ground_truth import build_ground_truth_template
+
+        report = build_ground_truth_template(
+            queries_path=args.queries,
+            output_path=args.output,
+            query_column=args.query_column,
         )
         print(json.dumps(report, indent=2))
         return
