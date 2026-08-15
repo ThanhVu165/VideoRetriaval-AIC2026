@@ -31,6 +31,9 @@ def main() -> None:
     build_index.add_argument("--output-index", type=Path, required=True)
     build_index.add_argument("--metadata-output", type=Path)
 
+    inspect_evidence = sub.add_parser("inspect-evidence", help="Inspect an ASR/OCR/caption SQLite artifact")
+    inspect_evidence.add_argument("--db", type=Path, required=True)
+
     retrieve = sub.add_parser("retrieve", help="Run CLIP retrieval + optional multimodal evidence + temporal localization")
     retrieve.add_argument("--manifest", type=Path, required=True)
     retrieve.add_argument("--embeddings", type=Path, required=True)
@@ -113,6 +116,12 @@ def main() -> None:
             metadata_output=args.metadata_output,
         )
         print(json.dumps(report, indent=2))
+        return
+
+    if args.command == "inspect-evidence":
+        from .evidence import inspect_sqlite_evidence
+
+        print(json.dumps(inspect_sqlite_evidence(args.db), indent=2, ensure_ascii=False))
         return
 
     if args.command == "ground-truth-template":
