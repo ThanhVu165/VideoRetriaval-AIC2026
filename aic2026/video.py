@@ -53,7 +53,13 @@ def iter_frame_ids(
     path: str | Path,
     frame_ids: list[int] | tuple[int, ...],
 ) -> Iterator[tuple[int, object]]:
-    """Decode requested original frame IDs without assuming keyframe ordinals."""
+    """Decode requested frame IDs with one sequential decoder pass.
+
+    The previous implementation performed a random seek for every requested
+    frame. That is expensive for H.264 and can trigger decoder warnings when
+    a window contains many nearby frames. We now seek once to the first
+    requested frame and decode forward, yielding only requested IDs.
+    """
     unique_ids = sorted(set(int(i) for i in frame_ids if int(i) >= 0))
     if not unique_ids:
         return
@@ -61,13 +67,23 @@ def iter_frame_ids(
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {path}")
+
     try:
-        for frame_id in unique_ids:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_id)
+        first_id = unique_ids[0]
+        if not cap.set(cv2.CAP_PROP_POS_FRAMES, first_id):
+            raise RuntimeError(f"Cannot seek to frame {first_id}: {path}")
+
+        wanted = set(unique_ids)
+        current_id = first_id
+        last_id = unique_ids[-1]
+
+        while current_id <= last_id:
             ok, frame = cap.read()
             if not ok:
-                continue
-            yield frame_id, frame
+                break
+            if current_id in wanted:
+                yield current_id, frame
+            current_id += 1
     finally:
         cap.release()
 
