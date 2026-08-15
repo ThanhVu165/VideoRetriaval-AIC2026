@@ -38,11 +38,6 @@ def _pick(columns: Sequence[str], names: Iterable[str]) -> str | None:
 
 @dataclass(frozen=True)
 class EvidenceConfig:
-    """Schema hints for an evidence source.
-
-    Empty hints are resolved automatically from the SQLite table schema.
-    """
-
     table: str | None = None
     video_column: str | None = None
     frame_column: str | None = None
@@ -57,12 +52,7 @@ class EvidenceStore:
 
 
 class SQLiteEvidenceStore(EvidenceStore):
-    """Read ASR/OCR/caption-like evidence without assuming one fixed schema.
-
-    The adapter inspects tables once, then fetches evidence only for the
-    retrieved candidates. This keeps auxiliary modalities optional and avoids
-    scanning the entire artifact for every query.
-    """
+    """Read ASR/OCR/caption-like evidence without assuming one fixed schema."""
 
     def __init__(self, path: str | Path, name: str, config: EvidenceConfig | None = None):
         self.path = Path(path)
@@ -93,15 +83,9 @@ class SQLiteEvidenceStore(EvidenceStore):
                         continue
                     info = con.execute(f'PRAGMA table_info("{candidate}")').fetchall()
                     columns = [str(r[1]) for r in info]
-                    video = self.config.video_column or _pick(
-                        columns, ("video_id", "video", "vid", "videoid")
-                    )
-                    frame = self.config.frame_column or _pick(
-                        columns, ("frame_id", "frame_idx", "frame", "keyframe_id", "original_frame_id")
-                    )
-                    text = self.config.text_column or _pick(
-                        columns, ("text", "transcript", "asr", "ocr", "caption", "content", "value", "description")
-                    )
+                    video = self.config.video_column or _pick(columns, ("video_id", "video", "vid", "videoid"))
+                    frame = self.config.frame_column or _pick(columns, ("frame_id", "frame_idx", "frame", "keyframe_id", "original_frame_id"))
+                    text = self.config.text_column or _pick(columns, ("text", "transcript", "asr", "ocr", "caption", "content", "value", "description"))
                     if video and text:
                         self.table = candidate
                         self.video_column = video
@@ -197,3 +181,34 @@ class JsonEvidenceStore(EvidenceStore):
                 best = max(best, score)
             out.append(best)
         return out
+
+
+def inspect_sqlite_evidence(path: str | Path) -> dict[str, object]:
+    """Return tables, columns, row counts and the schema the adapter would use."""
+    db = Path(path)
+    report: dict[str, object] = {"path": str(db), "exists": db.exists(), "tables": []}
+    if not db.exists():
+        return report
+    tables: list[dict[str, object]] = []
+    try:
+        with sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True) as con:
+            names = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+            for name in names:
+                info = con.execute(f'PRAGMA table_info("{name}")').fetchall()
+                columns = [str(r[1]) for r in info]
+                count = int(con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0])
+                tables.append(
+                    {
+                        "table": name,
+                        "columns": columns,
+                        "rows": count,
+                        "inferred_video_column": _pick(columns, ("video_id", "video", "vid", "videoid")),
+                        "inferred_frame_column": _pick(columns, ("frame_id", "frame_idx", "frame", "keyframe_id", "original_frame_id")),
+                        "inferred_text_column": _pick(columns, ("text", "transcript", "asr", "ocr", "caption", "content", "value", "description")),
+                    }
+                )
+    except (OSError, sqlite3.Error) as exc:
+        report["error"] = str(exc)
+        return report
+    report["tables"] = tables
+    return report
