@@ -8,6 +8,7 @@ from typing import Callable, Sequence
 import numpy as np
 import pandas as pd
 
+from .evidence import EvidenceStore
 from .fine_scoring import (
     FrameScorerProtocol,
     TemporalScoreConfig,
@@ -67,12 +68,17 @@ class RetrievalPipeline:
         media_info_dir: str | Path | None = None,
         ranking_weights: RankingWeights | None = None,
         temporal_config: TemporalScoreConfig | None = None,
+        evidence_stores: Sequence[EvidenceStore] | None = None,
+        evidence_rrf_k: int = 60,
     ):
         self.frame_index = frame_index
         self.videos_dir = Path(videos_dir)
         self.media_info_dir = Path(media_info_dir) if media_info_dir else None
         self.video_resolver = VideoResolver(self.videos_dir)
-        self.reranker = MultimodalReranker()
+        self.reranker = MultimodalReranker(
+            evidence_stores=evidence_stores,
+            rrf_k=evidence_rrf_k,
+        )
         self.ranking_weights = ranking_weights or RankingWeights(
             retrieval=0.55,
             multimodal=0.30,
