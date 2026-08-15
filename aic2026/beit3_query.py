@@ -8,6 +8,16 @@ from pathlib import Path
 import numpy as np
 
 
+_BEIT3_CHECKPOINT_NAME = "beit3_large_patch16_384_coco_retrieval.pth"
+_BEIT3_SPM_NAME = "beit3.spm"
+
+
+def _default_beit3_home() -> Path:
+    # Keep large model assets outside the Git repository history while making
+    # the standard local layout work without manual environment variables.
+    return Path(__file__).resolve().parent.parent / "models" / "beit3"
+
+
 @lru_cache
 def load_beit3(device: str):
     """Load the BEiT-3 Large COCO-retrieval text encoder."""
@@ -16,27 +26,46 @@ def load_beit3(device: str):
     except ImportError as exc:
         raise ImportError("BEiT-3 query encoding requires transformers") from exc
 
-    home = os.environ.get("AIC_BEIT3_HOME", "")
-    checkpoint = os.environ.get("AIC_BEIT3_CHECKPOINT", "")
-    spm = os.environ.get("AIC_BEIT3_SPM", "")
-    if not all((home, checkpoint, spm)):
-        raise RuntimeError(
-            "Set AIC_BEIT3_HOME, AIC_BEIT3_CHECKPOINT and AIC_BEIT3_SPM."
+    default_home = _default_beit3_home()
+    home = Path(os.environ.get("AIC_BEIT3_HOME", str(default_home)))
+    checkpoint = Path(
+        os.environ.get(
+            "AIC_BEIT3_CHECKPOINT",
+            str(home / _BEIT3_CHECKPOINT_NAME),
         )
-    if not Path(checkpoint).is_file():
-        raise FileNotFoundError(f"BEiT-3 checkpoint not found: {checkpoint}")
-    if not Path(spm).is_file():
-        raise FileNotFoundError(f"BEiT-3 SentencePiece model not found: {spm}")
+    )
+    spm = Path(
+        os.environ.get(
+            "AIC_BEIT3_SPM",
+            str(home / _BEIT3_SPM_NAME),
+        )
+    )
 
-    if home not in sys.path:
-        sys.path.insert(0, home)
+    if not checkpoint.is_file():
+        raise FileNotFoundError(
+            "BEiT-3 retrieval checkpoint not found. Expected: "
+            f"{checkpoint}. Download {_BEIT3_CHECKPOINT_NAME} and place it "
+            "under models/beit3/, or set AIC_BEIT3_CHECKPOINT."
+        )
+    if not spm.is_file():
+        raise FileNotFoundError(
+            "BEiT-3 SentencePiece model not found. Expected: "
+            f"{spm}. Download beit3.spm and place it under models/beit3/, "
+            "or set AIC_BEIT3_SPM."
+        )
+    if not home.is_dir():
+        raise FileNotFoundError(f"BEiT-3 source directory not found: {home}")
+
+    home_str = str(home.resolve())
+    if home_str not in sys.path:
+        sys.path.insert(0, home_str)
     import modeling_finetune
     import utils
 
     model = modeling_finetune.beit3_large_patch16_384_retrieval()
-    utils.load_model_and_may_interpolate(checkpoint, model, "model|module", "")
+    utils.load_model_and_may_interpolate(str(checkpoint), model, "model|module", "")
     model = model.to(device).eval()
-    tokenizer = XLMRobertaTokenizer(spm)
+    tokenizer = XLMRobertaTokenizer(str(spm))
     return model, tokenizer
 
 
