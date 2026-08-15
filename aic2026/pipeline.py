@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Callable, Sequence
 
 import numpy as np
 import pandas as pd
 
-from .fine_scoring import FrameScorer, TemporalScoreConfig, select_peak_frame, temporal_event_score
-from .multimodal import MultiModalReranker
-from .ranking import rerank_candidates, top_k_submission
+from .fine_scoring import (
+    FrameScorerProtocol,
+    TemporalScoreConfig,
+    select_peak_frame,
+    temporal_event_score,
+)
+from .multimodal import MultimodalReranker
+from .ranking import RankingWeights, rerank_candidates, top_k_submission
 from .retrieval import FrameIndex
 from .temporal import merge_frame_hits
 from .video import iter_frame_ids, probe_video
@@ -29,18 +35,21 @@ class LocalizedEvent:
 
 
 class VideoResolver:
+    """Resolve video IDs recursively under the configured video directory."""
+
     def __init__(self, videos_dir: str | Path):
         self.videos_dir = Path(videos_dir)
         self._paths: dict[str, Path] = {}
         self._duplicates: dict[str, list[Path]] = {}
-        for path in self.videos_dir.rglob("*"):
-            if not path.is_file() or path.suffix.lower() not in VIDEO_EXTENSIONS:
-                continue
-            video_id = path.stem
-            if video_id in self._paths:
-                self._duplicates.setdefault(video_id, [self._paths[video_id]]).append(path)
-            else:
-                self._paths[video_id] = path
+        if self.videos_dir.exists():
+            for path in self.videos_dir.rglob("*"):
+                if not path.is_file() or path.suffix.lower() not in VIDEO_EXTENSIONS:
+                    continue
+                video_id = path.stem
+                if video_id in self._paths:
+                    self._duplicates.setdefault(video_id, [self._paths[video_id]]).append(path)
+                else:
+                    self._paths[video_id] = path
 
     @property
     def count(self) -> int:
@@ -55,19 +64,40 @@ class RetrievalPipeline:
         self,
         frame_index: FrameIndex,
         videos_dir: str | Path,
-        ranking_weights: dict[str, float] | None = None,
+        media_info_dir: str | Path | None = None,
+        ranking_weights: RankingWeights | None = None,
         temporal_config: TemporalScoreConfig | None = None,
     ):
         self.frame_index = frame_index
         self.videos_dir = Path(videos_dir)
+        self.media_info_dir = Path(media_info_dir) if media_info_dir else None
         self.video_resolver = VideoResolver(self.videos_dir)
-        self.reranker = MultiModalReranker(frame_index.manifest)
-        self.ranking_weights = ranking_weights or {
-            "retrieval_score": 0.55,
-            "multimodal_score": 0.30,
-            "temporal_score": 0.15,
-        }
+        self.reranker = MultimodalReranker()
+        self.ranking_weights = ranking_weights or RankingWeights(
+            retrieval=0.55,
+            multimodal=0.30,
+            temporal=0.15,
+        )
         self.temporal_config = temporal_config or TemporalScoreConfig()
+
+    def _metadata_text(self, video_id: str) -> str:
+        """Load optional per-video metadata as text without making it mandatory."""
+        if self.media_info_dir is None:
+            return ""
+        candidates = [
+            self.media_info_dir / f"{video_id}.json",
+            self.media_info_dir / video_id / "media_info.json",
+            self.media_info_dir / video_id / f"{video_id}.json",
+        ]
+        for path in candidates:
+            if not path.exists() or not path.is_file():
+                continue
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    return json.dumps(json.load(f), ensure_ascii=False)
+            except (OSError, ValueError, TypeError):
+                continue
+        return ""
 
     @staticmethod
     def _aggregate_frame_evidence(rows: pd.DataFrame, per_video_k: int = 5) -> pd.DataFrame:
@@ -109,14 +139,13 @@ class RetrievalPipeline:
             return pd.DataFrame()
         rows = pd.DataFrame([x.__dict__ for x in frames])
         candidates = self._aggregate_frame_evidence(rows, per_video_k=per_video_k)
-        candidates["metadata_text"] = ""
+        candidates["metadata_text"] = [self._metadata_text(v) for v in candidates["video_id"]]
         try:
             fused = self.reranker.score_manifest(query, candidates)
-        except (AttributeError, TypeError, KeyError):
-            # The core retrieval contract must remain usable even when the
-            # optional multimodal reranker implementation changes shape.
+        except (AttributeError, TypeError, KeyError, ValueError):
             fused = candidates.copy()
             fused["fused_score"] = fused["retrieval_score"]
+
         fused["multimodal_score"] = fused["fused_score"]
         keep = [
             "video_id",
@@ -137,7 +166,7 @@ class RetrievalPipeline:
     def localize(
         self,
         candidate: pd.Series,
-        frame_scorer: FrameScorerFn | None = None,
+        frame_scorer: FrameScorerFn | FrameScorerProtocol | None = None,
         radius_frames: int = 24,
         max_decode_frames: int = 96,
     ) -> LocalizedEvent:
@@ -151,6 +180,9 @@ class RetrievalPipeline:
             )
 
         info = probe_video(video_path)
+        if info.frame_count <= 0:
+            raise RuntimeError(f"Video has no decodable frames: {video_path}")
+
         start = max(0, coarse - radius_frames)
         end = min(info.frame_count - 1, coarse + radius_frames)
         frame_ids = list(range(start, end + 1))
@@ -164,7 +196,10 @@ class RetrievalPipeline:
         observed_ids = [frame_id for frame_id, _ in decoded]
 
         if frame_scorer is None:
-            semantic = coarse if coarse in observed_ids else observed_ids[len(observed_ids) // 2]
+            semantic = coarse if coarse in observed_ids else min(
+                observed_ids,
+                key=lambda frame_id: abs(frame_id - coarse),
+            )
             score = float(candidate.get("multimodal_score", candidate.get("retrieval_score", 0.0)))
             return LocalizedEvent(video_id, coarse, start, end, semantic, score)
 
@@ -177,12 +212,13 @@ class RetrievalPipeline:
         windows = merge_frame_hits(video_id, observed_ids, scores, max_gap=1)
         if windows:
             best_window = max(windows, key=lambda w: w.score)
-            local_ids = [
-                frame_id
-                for frame_id in observed_ids
+            local_pairs = [
+                (frame_id, score)
+                for frame_id, score in zip(observed_ids, scores)
                 if best_window.start_frame <= frame_id <= best_window.end_frame
             ]
-            local_scores = [scores[observed_ids.index(frame_id)] for frame_id in local_ids]
+            local_ids = [x[0] for x in local_pairs]
+            local_scores = [x[1] for x in local_pairs]
             event_score = temporal_event_score(local_ids, local_scores, self.temporal_config)
             return LocalizedEvent(
                 video_id,
@@ -207,12 +243,12 @@ class RetrievalPipeline:
         query: str,
         query_embedding: np.ndarray,
         top_k: int = 100,
-        frame_scorer: FrameScorerFn | None = None,
+        frame_scorer: FrameScorerFn | FrameScorerProtocol | None = None,
         radius_frames: int = 24,
         max_decode_frames: int = 96,
     ) -> pd.DataFrame:
         top_k_frames = max(top_k * 10, 1000)
-        top_k_videos = min(max(top_k, 10), 100)
+        top_k_videos = min(max(top_k, 1), 100)
         candidates = self.retrieve(
             query,
             query_embedding,
@@ -255,5 +291,4 @@ class RetrievalPipeline:
         )
 
 
-# Backwards-compatible alias for the CLI/API name used by earlier commits.
 AICPipeline = RetrievalPipeline
