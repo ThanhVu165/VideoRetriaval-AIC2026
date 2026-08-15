@@ -1,92 +1,51 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
 
 import numpy as np
 import pandas as pd
 
-from .fine_scoring import TemporalScoreConfig, select_peak_frame, temporal_event_score
-from .multimodal import FusionWeights, MultimodalReranker, load_json_text
-from .ranking import RankingWeights, rerank_candidates, top_k_submission
+from .alignment import LocalizedEvent, merge_frame_hits, select_peak_frame, temporal_event_score
+from .fine_scoring import FrameScorer
+from .inference import build_query_embedding
+from .multimodal import MultiModalReranker
+from .ranking import rerank_candidates, top_k_submission
 from .retrieval import FrameIndex
-from .temporal import merge_frame_hits
+from .temporal import TemporalConfig
 from .video import iter_frame_ids, probe_video
-
-FrameScorer = Callable[[Sequence[object]], Sequence[float]]
-VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".webm"}
-
-
-@dataclass(frozen=True)
-class LocalizedEvent:
-    video_id: str
-    coarse_frame_id: int
-    start_frame: int
-    end_frame: int
-    semantic_keyframe: int
-    score: float
+from .vqa import answer_query
 
 
 class VideoResolver:
-    """Resolve AIC video IDs against a recursively discovered source corpus."""
-
-    def __init__(self, root: str | Path):
-        self.root = Path(root)
-        self._by_id: dict[str, Path] = {}
-        self._duplicates: dict[str, list[Path]] = {}
-        if self.root.exists():
-            for path in self.root.rglob("*"):
-                if not path.is_file() or path.suffix.lower() not in VIDEO_EXTENSIONS:
-                    continue
-                video_id = path.stem
-                if video_id in self._by_id:
-                    self._duplicates.setdefault(video_id, [self._by_id[video_id]]).append(path)
-                else:
-                    self._by_id[video_id] = path
-
-    def resolve(self, video_id: str) -> Path | None:
-        return self._by_id.get(video_id)
+    def __init__(self, videos_dir: str | Path):
+        self.videos_dir = Path(videos_dir)
+        self._paths = {
+            p.stem: p
+            for p in self.videos_dir.rglob("*")
+            if p.is_file() and p.suffix.lower() in {".mp4", ".mkv", ".mov", ".webm"}
+        }
 
     @property
     def count(self) -> int:
-        return len(self._by_id)
+        return len(self._paths)
 
-    @property
-    def duplicate_ids(self) -> dict[str, list[Path]]:
-        return self._duplicates
+    def resolve(self, video_id: str) -> Path | None:
+        return self._paths.get(video_id)
 
 
-class AICPipeline:
-    """Coarse-to-fine AIC retrieval pipeline."""
-
-    def __init__(
-        self,
-        frame_index: FrameIndex,
-        videos_dir: str | Path,
-        media_info_dir: str | Path | None = None,
-        reranker: MultimodalReranker | None = None,
-        ranking_weights: RankingWeights | None = None,
-        temporal_config: TemporalScoreConfig | None = None,
-    ):
+class RetrievalPipeline:
+    def __init__(self, frame_index: FrameIndex, videos_dir: str | Path, ranking_weights: dict[str, float] | None = None, temporal_config: TemporalConfig | None = None):
         self.frame_index = frame_index
         self.videos_dir = Path(videos_dir)
-        self.video_resolver = VideoResolver(self.videos_dir)
-        self.media_info_dir = Path(media_info_dir) if media_info_dir else None
-        self.reranker = reranker or MultimodalReranker(FusionWeights())
-        self.ranking_weights = ranking_weights or RankingWeights()
-        self.temporal_config = temporal_config or TemporalScoreConfig()
+        self.video_resolver = VideoResolver(videos_dir)
+        self.reranker = MultiModalReranker(frame_index.manifest)
+        self.ranking_weights = ranking_weights or {"retrieval_score": 0.55, "multimodal_score": 0.30, "temporal_score": 0.15}
+        self.temporal_config = temporal_config or TemporalConfig()
 
     def _metadata_text(self, video_id: str) -> str:
-        if self.media_info_dir is None:
-            return ""
-        return load_json_text(self.media_info_dir / f"{video_id}.json")
+        return ""
 
-    @staticmethod
-    def _aggregate_frame_evidence(rows: pd.DataFrame, per_video_k: int = 5) -> pd.DataFrame:
-        if rows.empty:
-            return rows.copy()
-        rows = rows.sort_values(["video_id", "score"], ascending=[True, False])
+    def _aggregate_frame_evidence(self, rows: pd.DataFrame, per_video_k: int = 5) -> pd.DataFrame:
         records: list[dict[str, object]] = []
         for video_id, group in rows.groupby("video_id", sort=False):
             top = group.head(per_video_k)
@@ -170,10 +129,10 @@ class AICPipeline:
 
     def run(self, query: str, query_embedding: np.ndarray, top_k: int = 100, frame_scorer: FrameScorer | None = None, radius_frames: int = 24, max_decode_frames: int = 96) -> pd.DataFrame:
         # Retrieval needs a broad frame pool, but temporal decoding should only
-        # inspect a smaller candidate-video set. This avoids decoding hundreds
-        # of source videos for every query.
+        # inspect the requested candidate-video count. In particular, a small
+        # debug top-k must not silently expand to 20 temporal decodes.
         top_k_frames = max(top_k * 10, 1000)
-        top_k_videos = min(max(top_k, 20), 100)
+        top_k_videos = min(max(top_k, 10), 100)
         candidates = self.retrieve(
             query,
             query_embedding,
