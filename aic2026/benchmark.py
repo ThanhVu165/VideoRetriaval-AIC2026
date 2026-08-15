@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
 
-from .metrics import mean_recall_at_k, reciprocal_rank
+from .evidence import EvidenceStore
+from .metrics import reciprocal_rank
 from .pipeline import RetrievalPipeline
 from .retrieval import FrameIndex
 
@@ -42,12 +43,7 @@ def load_queries(path: str | Path, query_column: str = "Description") -> pd.Data
 
 
 def load_ground_truth(path: str | Path) -> dict[str, dict[str, Any]]:
-    """Load explicit GT JSON.
-
-    Supported record form:
-      {"query_id": {"video_ids": ["L21_V001"], "frames": {"L21_V001": [1234]}}}
-    or a list of records with query_id/video_ids/frames.
-    """
+    """Load explicit GT JSON."""
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     records = payload if isinstance(payload, list) else payload.get("queries", payload)
     if isinstance(records, dict):
@@ -83,7 +79,6 @@ def evaluate_results(
     frame_tolerance: int = 10,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     per_query: list[dict[str, Any]] = []
-    metric_rows: list[dict[str, Any]] = []
 
     for query_id, rows in results.items():
         gt = (ground_truth or {}).get(query_id, {})
@@ -102,12 +97,7 @@ def evaluate_results(
             row["mrr"] = reciprocal_rank(ranked, relevant)
             for k in ks:
                 row[f"r@{k}"] = float(bool(set(ranked[:k]) & relevant))
-            frame_hits = [
-                any(_frame_hit(candidate, gt, frame_tolerance) for candidate in rows[:k])
-                for k in ks
-            ]
-            for k, hit in zip(ks, frame_hits):
-                row[f"frame_r@{k}"] = float(hit)
+                row[f"frame_r@{k}"] = float(any(_frame_hit(candidate, gt, frame_tolerance) for candidate in rows[:k]))
         else:
             row["mrr"] = None
             for k in ks:
@@ -155,6 +145,8 @@ def run_benchmark(
     max_decode_frames: int = 96,
     ground_truth_path: str | Path | None = None,
     frame_tolerance: int = 10,
+    evidence_stores: Sequence[EvidenceStore] | None = None,
+    evidence_rrf_k: int = 60,
 ) -> dict[str, Any]:
     queries = load_queries(queries_path, query_column=query_column)
     output = Path(output_dir)
@@ -168,7 +160,12 @@ def run_benchmark(
     from .query_encoder import CLIPQueryEncoder
 
     encoder = CLIPQueryEncoder(model_name=model_name, pretrained=pretrained, device=device)
-    pipeline = RetrievalPipeline(index, videos_dir)
+    pipeline = RetrievalPipeline(
+        index,
+        videos_dir,
+        evidence_stores=evidence_stores,
+        evidence_rrf_k=evidence_rrf_k,
+    )
 
     all_results: dict[str, list[dict[str, Any]]] = {}
     for _, q in queries.iterrows():
@@ -183,14 +180,15 @@ def run_benchmark(
                 localized.append({**candidate.to_dict(), "temporal_start_frame": event.start_frame, "temporal_end_frame": event.end_frame, "semantic_keyframe": event.semantic_keyframe, "temporal_score": event.score})
             localized_df = pd.DataFrame(localized)
             tail = candidates.iloc[localize_top_k:].copy()
-            all_df = pd.concat([localized_df, tail], ignore_index=True)
-            candidates = all_df
+            candidates = pd.concat([localized_df, tail], ignore_index=True)
         rows = candidates.to_dict(orient="records")
         all_results[qid] = rows
         (output / f"{qid}.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
     gt = load_ground_truth(ground_truth_path) if ground_truth_path else None
     summary, per_query = evaluate_results(all_results, gt, frame_tolerance=frame_tolerance)
+    summary["evidence_modalities"] = [s.name for s in (evidence_stores or ())]
+    summary["evidence_rrf_k"] = evidence_rrf_k
     (output / "results.json").write_text(json.dumps(all_results, ensure_ascii=False, indent=2), encoding="utf-8")
     (output / "per_query.json").write_text(json.dumps(per_query, ensure_ascii=False, indent=2), encoding="utf-8")
     (output / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
