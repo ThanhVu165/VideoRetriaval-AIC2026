@@ -9,10 +9,22 @@ from aic2026.video import probe_video
 
 
 def discover_videos(video_dir: Path, extensions: tuple[str, ...]) -> list[Path]:
-    videos: list[Path] = []
-    for ext in extensions:
-        videos.extend(video_dir.glob(f"*.{ext}"))
-    return sorted(set(videos))
+    """Recursively discover source videos below ``video_dir``.
+
+    AIC data may be packaged with an extra directory level such as
+    ``data/videos/video/*.mp4``. Recursive discovery keeps the CLI independent
+    of that packaging detail while preserving deterministic ordering.
+    """
+    root = video_dir.expanduser().resolve()
+    if not root.exists():
+        return []
+    normalized = {ext.lower().lstrip(".") for ext in extensions}
+    videos = [
+        path
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower().lstrip(".") in normalized
+    ]
+    return sorted(set(videos), key=lambda p: str(p).lower())
 
 
 def build_manifest(video_dir: Path, output: Path, extensions: tuple[str, ...]) -> dict[str, int]:
@@ -40,9 +52,20 @@ def build_manifest(video_dir: Path, output: Path, extensions: tuple[str, ...]) -
         )
 
     with output.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]) if rows else [
-            "video_id", "video_path", "fps", "frame_count", "duration_sec", "width", "height"
-        ])
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=list(rows[0])
+            if rows
+            else [
+                "video_id",
+                "video_path",
+                "fps",
+                "frame_count",
+                "duration_sec",
+                "width",
+                "height",
+            ],
+        )
         writer.writeheader()
         writer.writerows(rows)
 
