@@ -47,6 +47,24 @@ def main() -> None:
     retrieve.add_argument("--radius-frames", type=int, default=24)
     retrieve.add_argument("--max-decode-frames", type=int, default=96)
 
+    benchmark = sub.add_parser("benchmark", help="Run a query set and report retrieval/frame metrics")
+    benchmark.add_argument("--queries", type=Path, required=True)
+    benchmark.add_argument("--query-column", default="Description")
+    benchmark.add_argument("--manifest", type=Path, required=True)
+    benchmark.add_argument("--embeddings", type=Path, required=True)
+    benchmark.add_argument("--faiss-index", type=Path)
+    benchmark.add_argument("--videos-dir", type=Path, required=True)
+    benchmark.add_argument("--output-dir", type=Path, required=True)
+    benchmark.add_argument("--ground-truth", type=Path)
+    benchmark.add_argument("--model-name", default="ViT-B-32")
+    benchmark.add_argument("--pretrained", default="openai")
+    benchmark.add_argument("--device", default="cpu")
+    benchmark.add_argument("--top-k", type=int, default=100)
+    benchmark.add_argument("--localize-top-k", type=int, default=0, help="0 disables video decoding during benchmark")
+    benchmark.add_argument("--radius-frames", type=int, default=24)
+    benchmark.add_argument("--max-decode-frames", type=int, default=96)
+    benchmark.add_argument("--frame-tolerance", type=int, default=10)
+
     args = parser.parse_args()
     if args.command == "video-manifest":
         from .video_manifest import build_manifest
@@ -77,6 +95,30 @@ def main() -> None:
             args.embeddings,
             args.output_index,
             metadata_output=args.metadata_output,
+        )
+        print(json.dumps(report, indent=2))
+        return
+
+    if args.command == "benchmark":
+        from .benchmark import run_benchmark
+
+        report = run_benchmark(
+            queries_path=args.queries,
+            manifest_path=args.manifest,
+            embeddings_path=args.embeddings,
+            faiss_index_path=args.faiss_index,
+            videos_dir=args.videos_dir,
+            output_dir=args.output_dir,
+            query_column=args.query_column,
+            model_name=args.model_name,
+            pretrained=args.pretrained,
+            device=args.device,
+            top_k=args.top_k,
+            localize_top_k=args.localize_top_k,
+            radius_frames=args.radius_frames,
+            max_decode_frames=args.max_decode_frames,
+            ground_truth_path=args.ground_truth,
+            frame_tolerance=args.frame_tolerance,
         )
         print(json.dumps(report, indent=2))
         return
