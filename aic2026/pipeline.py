@@ -15,6 +15,7 @@ from .temporal import merge_frame_hits
 from .video import iter_frame_ids, probe_video
 
 FrameScorer = Callable[[Sequence[object]], Sequence[float]]
+VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".webm"}
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,35 @@ class LocalizedEvent:
     end_frame: int
     semantic_keyframe: int
     score: float
+
+
+class VideoResolver:
+    """Resolve AIC video IDs against a recursively discovered source corpus."""
+
+    def __init__(self, root: str | Path):
+        self.root = Path(root)
+        self._by_id: dict[str, Path] = {}
+        self._duplicates: dict[str, list[Path]] = {}
+        if self.root.exists():
+            for path in self.root.rglob("*"):
+                if not path.is_file() or path.suffix.lower() not in VIDEO_EXTENSIONS:
+                    continue
+                video_id = path.stem
+                if video_id in self._by_id:
+                    self._duplicates.setdefault(video_id, [self._by_id[video_id]]).append(path)
+                else:
+                    self._by_id[video_id] = path
+
+    def resolve(self, video_id: str) -> Path | None:
+        return self._by_id.get(video_id)
+
+    @property
+    def count(self) -> int:
+        return len(self._by_id)
+
+    @property
+    def duplicate_ids(self) -> dict[str, list[Path]]:
+        return self._duplicates
 
 
 class AICPipeline:
@@ -41,6 +71,7 @@ class AICPipeline:
     ):
         self.frame_index = frame_index
         self.videos_dir = Path(videos_dir)
+        self.video_resolver = VideoResolver(self.videos_dir)
         self.media_info_dir = Path(media_info_dir) if media_info_dir else None
         self.reranker = reranker or MultimodalReranker(FusionWeights())
         self.ranking_weights = ranking_weights or RankingWeights()
@@ -53,7 +84,6 @@ class AICPipeline:
 
     @staticmethod
     def _aggregate_frame_evidence(rows: pd.DataFrame, per_video_k: int = 5) -> pd.DataFrame:
-        """Aggregate multiple retrieved frames into stable video candidates."""
         if rows.empty:
             return rows.copy()
         rows = rows.sort_values(["video_id", "score"], ascending=[True, False])
@@ -80,14 +110,7 @@ class AICPipeline:
             )
         return pd.DataFrame(records).sort_values("retrieval_score", ascending=False).reset_index(drop=True)
 
-    def retrieve(
-        self,
-        query: str,
-        query_embedding: np.ndarray,
-        top_k_frames: int = 200,
-        top_k_videos: int = 100,
-        per_video_k: int = 5,
-    ) -> pd.DataFrame:
+    def retrieve(self, query: str, query_embedding: np.ndarray, top_k_frames: int = 200, top_k_videos: int = 100, per_video_k: int = 5) -> pd.DataFrame:
         frames = self.frame_index.search_frames(query_embedding, top_k=top_k_frames)
         if not frames:
             return pd.DataFrame()
@@ -96,30 +119,20 @@ class AICPipeline:
         candidates["metadata_text"] = candidates["video_id"].map(self._metadata_text)
         fused = self.reranker.score_manifest(query, candidates)
         fused["multimodal_score"] = fused["fused_score"]
-        keep = [
-            "video_id", "retrieval_score", "multimodal_score", "best_frame_idx",
-            "best_frame_id", "best_pts_time", "object_path", "retrieval_best_score",
-            "retrieval_topk_mean", "retrieval_score_std",
-        ]
+        keep = ["video_id", "retrieval_score", "multimodal_score", "best_frame_idx", "best_frame_id", "best_pts_time", "object_path", "retrieval_best_score", "retrieval_topk_mean", "retrieval_score_std"]
         candidates = fused[keep].copy()
         candidates["temporal_score"] = 0.0
         return rerank_candidates(candidates, self.ranking_weights).head(top_k_videos).reset_index(drop=True)
 
-    def localize(
-        self,
-        candidate: pd.Series,
-        frame_scorer: FrameScorer | None = None,
-        radius_frames: int = 24,
-        max_decode_frames: int = 96,
-    ) -> LocalizedEvent:
+    def localize(self, candidate: pd.Series, frame_scorer: FrameScorer | None = None, radius_frames: int = 24, max_decode_frames: int = 96) -> LocalizedEvent:
         video_id = str(candidate["video_id"])
         coarse = int(candidate["best_frame_id"])
-        video_path = self.videos_dir / f"{video_id}.mp4"
-        if not video_path.exists():
-            alternatives = list(self.videos_dir.glob(f"{video_id}.*"))
-            if not alternatives:
-                raise FileNotFoundError(f"Source video not found for {video_id}")
-            video_path = alternatives[0]
+        video_path = self.video_resolver.resolve(video_id)
+        if video_path is None:
+            raise FileNotFoundError(
+                f"Source video not found for {video_id} under {self.videos_dir} "
+                f"(discovered {self.video_resolver.count} videos recursively)"
+            )
 
         info = probe_video(video_path)
         start = max(0, coarse - radius_frames)
@@ -155,41 +168,14 @@ class AICPipeline:
 
         return LocalizedEvent(video_id, coarse, start, end, semantic, temporal_event_score(observed_ids, scores, self.temporal_config))
 
-    def run(
-        self,
-        query: str,
-        query_embedding: np.ndarray,
-        top_k: int = 100,
-        frame_scorer: FrameScorer | None = None,
-        radius_frames: int = 24,
-        max_decode_frames: int = 96,
-    ) -> pd.DataFrame:
-        candidates = self.retrieve(
-            query,
-            query_embedding,
-            top_k_frames=max(top_k * 10, 1000),
-            top_k_videos=min(max(top_k * 2, 100), 500),
-            per_video_k=5,
-        )
+    def run(self, query: str, query_embedding: np.ndarray, top_k: int = 100, frame_scorer: FrameScorer | None = None, radius_frames: int = 24, max_decode_frames: int = 96) -> pd.DataFrame:
+        candidates = self.retrieve(query, query_embedding, top_k_frames=max(top_k * 10, 1000), top_k_videos=min(max(top_k * 2, 100), 500), per_video_k=5)
         if candidates.empty:
             return candidates
         events: list[dict[str, object]] = []
         for _, candidate in candidates.iterrows():
-            event = self.localize(
-                candidate,
-                frame_scorer=frame_scorer,
-                radius_frames=radius_frames,
-                max_decode_frames=max_decode_frames,
-            )
-            events.append(
-                {
-                    **candidate.to_dict(),
-                    "temporal_start_frame": event.start_frame,
-                    "temporal_end_frame": event.end_frame,
-                    "semantic_keyframe": event.semantic_keyframe,
-                    "temporal_score": event.score,
-                }
-            )
+            event = self.localize(candidate, frame_scorer=frame_scorer, radius_frames=radius_frames, max_decode_frames=max_decode_frames)
+            events.append({**candidate.to_dict(), "temporal_start_frame": event.start_frame, "temporal_end_frame": event.end_frame, "semantic_keyframe": event.semantic_keyframe, "temporal_score": event.score})
         result = pd.DataFrame(events)
         return rerank_candidates(result, self.ranking_weights).head(top_k).reset_index(drop=True)
 
