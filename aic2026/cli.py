@@ -63,6 +63,10 @@ def main() -> None:
     benchmark.add_argument("--model-name", default="ViT-B-32")
     benchmark.add_argument("--pretrained", default="openai")
     benchmark.add_argument("--device", default="cpu")
+    benchmark.add_argument("--asr-db", type=Path)
+    benchmark.add_argument("--ocr-db", type=Path)
+    benchmark.add_argument("--caption-db", type=Path)
+    benchmark.add_argument("--evidence-rrf-k", type=int, default=60)
     benchmark.add_argument("--top-k", type=int, default=100)
     benchmark.add_argument("--localize-top-k", type=int, default=0, help="0 disables video decoding during benchmark")
     benchmark.add_argument("--radius-frames", type=int, default=24)
@@ -123,7 +127,16 @@ def main() -> None:
         return
 
     if args.command == "benchmark":
+        from .evidence import SQLiteEvidenceStore
         from .benchmark import run_benchmark
+
+        stores = []
+        if args.asr_db:
+            stores.append(SQLiteEvidenceStore(args.asr_db, "asr"))
+        if args.ocr_db:
+            stores.append(SQLiteEvidenceStore(args.ocr_db, "ocr"))
+        if args.caption_db:
+            stores.append(SQLiteEvidenceStore(args.caption_db, "caption"))
 
         report = run_benchmark(
             queries_path=args.queries,
@@ -142,6 +155,8 @@ def main() -> None:
             max_decode_frames=args.max_decode_frames,
             ground_truth_path=args.ground_truth,
             frame_tolerance=args.frame_tolerance,
+            evidence_stores=stores,
+            evidence_rrf_k=args.evidence_rrf_k,
         )
         print(json.dumps(report, indent=2))
         return
