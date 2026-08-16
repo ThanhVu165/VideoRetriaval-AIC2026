@@ -32,7 +32,7 @@ def main() -> None:
     inspect_evidence = sub.add_parser("inspect-evidence", help="Inspect an ASR/OCR/caption SQLite artifact")
     inspect_evidence.add_argument("--db", type=Path, required=True)
 
-    retrieve = sub.add_parser("retrieve", help="Run CLIP retrieval + optional BEiT-3 + evidence + temporal localization")
+    retrieve = sub.add_parser("retrieve", help="Run CLIP retrieval + optional evidence + temporal localization")
     retrieve.add_argument("--manifest", type=Path, required=True)
     retrieve.add_argument("--embeddings", type=Path, required=True)
     retrieve.add_argument("--faiss-index", type=Path)
@@ -51,9 +51,12 @@ def main() -> None:
     retrieve.add_argument("--beit3", action="store_true", help="Also encode the query with the configured BEiT-3 Large retrieval model and fuse with CLIP")
     retrieve.add_argument("--beit3-index", type=Path, default=Path("artifacts/beit3.faiss"))
     retrieve.add_argument("--beit3-weight", type=float, default=0.35)
+    retrieve.add_argument("--multimodal", action="store_true", help="Enable object/metadata/evidence-aware reranking")
     retrieve.add_argument("--top-k", type=int, default=100)
     retrieve.add_argument("--radius-frames", type=int, default=24)
     retrieve.add_argument("--max-decode-frames", type=int, default=96)
+    retrieve.add_argument("--fine-score", action="store_true", help="Rescore original temporal frames with the configured fine scorer")
+    retrieve.add_argument("--fine-batch-size", type=int, default=32)
 
     benchmark = sub.add_parser("benchmark", help="Run a query set and report retrieval/frame metrics")
     benchmark.add_argument("--queries", type=Path, required=True)
@@ -163,6 +166,24 @@ def main() -> None:
         if args.caption_db:
             stores.append(SQLiteEvidenceStore(args.caption_db, "caption"))
 
+        # Explicit multimodal mode auto-discovers common local support artifacts.
+        if args.multimodal:
+            root = Path("data")
+            auto_specs = [
+                ("caption", [Path("artifacts/caption.sqlite"), root / "caption.sqlite"]),
+                ("ocr", [Path("artifacts/ocr.sqlite"), root / "ocr.sqlite"]),
+                ("asr", [Path("artifacts/asr.sqlite"), root / "asr.sqlite"]),
+            ]
+            existing = {s.name for s in stores}
+            for name, candidates in auto_specs:
+                if name in existing:
+                    continue
+                for path in candidates:
+                    store = SQLiteEvidenceStore(path, name)
+                    if store.available:
+                        stores.append(store)
+                        break
+
         beit3_index = None
         beit3_query_embedding = None
         if args.beit3:
@@ -176,6 +197,7 @@ def main() -> None:
             index, args.videos_dir, media_info_dir=args.media_info_dir,
             evidence_stores=stores, evidence_rrf_k=args.evidence_rrf_k,
             beit3_index=beit3_index, beit3_weight=args.beit3_weight,
+            auto_object_evidence=args.multimodal,
         )
         result = pipeline.run(
             args.query, query_embedding, top_k=args.top_k,
@@ -185,6 +207,7 @@ def main() -> None:
         pipeline.write_candidates(result, args.output, top_k=args.top_k)
         print(json.dumps({
             "rows": len(result), "output": str(args.output),
+            "multimodal": bool(args.multimodal),
             "evidence_modalities": [s.name for s in stores if s.available],
             "evidence_requested": [s.name for s in stores],
             "evidence_rrf_k": args.evidence_rrf_k,
