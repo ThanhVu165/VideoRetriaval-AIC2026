@@ -48,7 +48,9 @@ Ranking / Top-k
 - an end-to-end TRAKE baseline with cross-event video selection and monotonic alignment;
 - an end-to-end VQA runner with an optional Hugging Face VLM backend;
 - CLI entry points for `retrieve --fine-score`, `trake`, and `vqa`;
-- existing benchmark and ground-truth template utilities.
+- existing benchmark and ground-truth template utilities;
+- verified competition scoring primitives;
+- a canonical local query-manifest loader for the supplied query workbook.
 
 These are **baselines**, not evidence of official competition completeness. In particular, the official query/ground-truth/submission binding is still pending.
 
@@ -65,7 +67,50 @@ The latest supplied full audit reports:
 - 873 media-info JSONs;
 - 177,321 object JSONs.
 
+The supplied `frames.csv` contains 177,321 frame records with `frame_id`, `frame_uid`, `video_id`, `keyframe_n`, `timestamp_sec`, `frame_path`, and `source`.
+
+The supplied evidence databases currently contain:
+
+- `caption.sqlite`: 177,321 rows in the primary `caption` table;
+- `ocr.sqlite`: 164,820 rows in the primary `ocr` table.
+
+Both are evidence/index sources, not ground truth.
+
 Video is the official competition data; keyframes, objects, CLIP features and metadata are supporting data. Preserve the mapping between keyframe ordinal and original video `frame_id` exactly.
+
+## Query workbook audit
+
+The supplied `DanhSachTruyVanAIC_Chungket.xlsx` contains **29 query records** with columns:
+
+```text
+Query Name
+Description
+Trans
+```
+
+Observed local query inventory:
+
+```text
+TKIS  = 14: 01–10, 12–15
+QA    =  6: 01, 02, 04–07
+TRAKE =  4: 01–04
+VKIS  =  5: 01, 02, 06, 07, 09
+```
+
+The four TRAKE descriptions explicitly contain ordered events:
+
+```text
+trake-01 → 4 events
+trake-02 → 3 events
+trake-03 → 3 events
+trake-04 → 4 events
+```
+
+The workbook is a **query-description source only**. It does not establish official video IDs, frame intervals, semantic-answer matching, or submission format.
+
+The `VKIS` prefix is preserved as an observed workbook category. Do not silently equate it with an official task family without source evidence.
+
+Detailed audit: `docs/query_source_audit.md`.
 
 ## Official scoring facts already verified from the supplied BTC PDF
 
@@ -161,6 +206,8 @@ Implement → Benchmark → Error analysis → Keep only measurable improvements
 8. Keep competition data, large embeddings and generated artifacts out of Git.
 9. Separate facts derived from `hcm-aic` from facts about this repository.
 10. Before declaring competition readiness, verify all three task families and all five ranking cutoffs through the competition evaluator.
+11. Treat the workbook query categories as local observed conventions until the organizer's official task schema is supplied.
+12. Treat caption/OCR databases as retrieval evidence, never as ground truth.
 
 ## Definition of done
 
