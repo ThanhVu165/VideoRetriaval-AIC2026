@@ -2,6 +2,8 @@
 
 AIC 2026 Video Retrieval pipeline: dataset integrity → multimodal candidate retrieval → temporal localization → semantic keyframe alignment → VQA adapter → ranking/top-k output.
 
+**Project context:** read [`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md) before major architectural changes. It is the frozen engineering direction for AI agents.
+
 The implementation is modular. Competition data and generated artifacts stay outside Git.
 
 ## Pipeline
@@ -102,13 +104,6 @@ The fine scorer is deliberately injected through an adapter so a stronger video-
 
 `aic2026.alignment.monotonic_event_alignment` solves ordered event-to-frame assignment with dynamic programming. It enforces temporal monotonicity and supports a minimum frame separation between events.
 
-```text
-Event 1 → keyframe 1
-Event 2 → keyframe 2
-...
-Event N → keyframe N
-```
-
 ## Phase 5 — Q&A
 
 `aic2026.vqa` defines a model-agnostic `VLMAnswerer` adapter. A selected local VLM can be connected once the inference checkpoint and official query format are fixed.
@@ -116,6 +111,36 @@ Event N → keyframe N
 ## Phase 6 — Ranking / Top-k
 
 `aic2026.ranking` keeps retrieval, temporal and multimodal evidence separate and produces a final `rank_score`. `top_k_submission()` provides deterministic Top-k candidate selection without claiming to implement an official BTC submission schema that has not been supplied to the repository.
+
+## Competition scoring foundation
+
+`aic2026.competition_metrics` contains pure scoring primitives verified from the supplied BTC PDF:
+
+```text
+R@1 / R@5 / R@20 / R@50 / R@100
+                 ↓
+             Final Score
+```
+
+The benchmark now binds these primitives to the **development KIS GT contract** when explicit video IDs and frame intervals are present. The benchmark reports these fields as `competition_r@k` and `competition_final_score`.
+
+The same benchmark also keeps generic diagnostics explicitly separate:
+
+- `video_recall@k` — retrieval diagnostic;
+- `frame_diagnostic@k` — local frame-tolerance diagnostic;
+- `mrr` — ranking diagnostic.
+
+These are **not** official AIC2026 scores.
+
+Q&A and TRAKE are not silently scored by the generic benchmark yet. Their task-specific GT/output schemas must be explicitly bound before those official scores are reported.
+
+The local GT JSON template is a development contract only; it must not be treated as the organizer's official query/ground-truth format.
+
+Run scoring tests with:
+
+```bash
+python -m unittest tests.test_competition_metrics tests.test_benchmark_scoring
+```
 
 ## End-to-end execution
 
@@ -150,11 +175,21 @@ Implemented in the active development branch:
 - temporal event scoring and semantic peak-frame selection
 - optional OpenCLIP query/frame runtime
 - TRAKE monotonic semantic keyframe alignment
-- VQA model adapter contract
+- VQA model adapter contract and optional local VLM runner
 - final candidate ranking and deterministic Top-k selection
-- unit tests for retrieval, temporal processing, alignment, ranking and fine scoring
+- development benchmark and ground-truth template utilities
+- verified competition scoring primitives
+- KIS benchmark binding to the verified R-Score rules
 
-The next research layer is learned reranking and a stronger temporal/video-language scorer; these should plug into the existing interfaces rather than redesign the data flow.
+Still required before competition submission:
+
+- official BTC query/ground-truth/submission package binding;
+- task-specific Q&A evaluator and semantic answer matcher;
+- task-specific TRAKE evaluator;
+- official end-to-end submission validation;
+- measured model/ranking optimization against the competition Final Score.
+
+The next research layer must plug into these interfaces rather than redesign the data flow.
 
 ## Development
 
