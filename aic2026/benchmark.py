@@ -7,17 +7,18 @@ from typing import Any, Sequence
 import numpy as np
 import pandas as pd
 
+from .competition_metrics import KS, final_score, kis_r_score, ranking_profile
 from .evidence import EvidenceStore
 from .metrics import reciprocal_rank
 from .pipeline import RetrievalPipeline
 from .retrieval import FrameIndex
 
 
-DEFAULT_KS = (1, 5, 20, 50, 100)
+DEFAULT_KS = KS
 
 
 def load_queries(path: str | Path, query_column: str = "Description") -> pd.DataFrame:
-    """Load query IDs and text from xlsx/csv/json without assuming a fixed dataset schema."""
+    """Load query IDs and text from xlsx/csv/json without claiming an official schema."""
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix in {".xlsx", ".xls"}:
@@ -43,7 +44,10 @@ def load_queries(path: str | Path, query_column: str = "Description") -> pd.Data
 
 
 def load_ground_truth(path: str | Path) -> dict[str, dict[str, Any]]:
-    """Load explicit GT JSON."""
+    """Load the repository's explicit development GT JSON contract.
+
+    This is intentionally separate from the organizer's official package schema.
+    """
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     records = payload if isinstance(payload, list) else payload.get("queries", payload)
     if isinstance(records, dict):
@@ -52,9 +56,12 @@ def load_ground_truth(path: str | Path) -> dict[str, dict[str, Any]]:
     for item in records:
         qid = str(item["query_id"])
         result[qid] = {
+            "task_type": str(item.get("task_type", "UNKNOWN")),
             "video_ids": [str(x) for x in item.get("video_ids", [])],
             "frames": item.get("frames", {}),
             "intervals": item.get("intervals", {}),
+            "events": item.get("events", []),
+            "answer": item.get("answer"),
         }
     return result
 
@@ -63,13 +70,49 @@ def _ranked_ids(rows: list[dict[str, Any]]) -> list[str]:
     return [str(x["video_id"]) for x in rows]
 
 
-def _frame_hit(row: dict[str, Any], gt: dict[str, Any], tolerance: int) -> bool:
+def _predicted_frame(row: dict[str, Any]) -> int | None:
+    pred = row.get("semantic_keyframe", row.get("best_frame_id"))
+    if pred is None:
+        return None
+    return int(pred)
+
+
+def _intervals_for_video(gt: dict[str, Any], video_id: str) -> list[tuple[int, int]]:
+    raw = gt.get("intervals", {}).get(video_id, [])
+    if not isinstance(raw, list):
+        return []
+    intervals: list[tuple[int, int]] = []
+    for item in raw:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            continue
+        intervals.append((int(item[0]), int(item[1])))
+    return intervals
+
+
+def _kis_candidate_r_score(row: dict[str, Any], gt: dict[str, Any]) -> float:
+    """Apply the official KIS R-Score to one candidate when local GT has intervals."""
+    video_id = str(row.get("video_id", ""))
+    gt_videos = {str(x) for x in gt.get("video_ids", [])}
+    frame_id = _predicted_frame(row)
+    if frame_id is None or video_id not in gt_videos:
+        return 0.0
+    intervals = _intervals_for_video(gt, video_id)
+    if not intervals:
+        return 0.0
+    return max(
+        kis_r_score(video_id, frame_id, video_id, start, end)
+        for start, end in intervals
+    )
+
+
+def _frame_hit_diagnostic(row: dict[str, Any], gt: dict[str, Any], tolerance: int) -> bool:
+    """Non-official tolerance diagnostic retained for debugging localization."""
     video_id = str(row.get("video_id", ""))
     frames = gt.get("frames", {}).get(video_id, [])
-    pred = row.get("semantic_keyframe", row.get("best_frame_id"))
+    pred = _predicted_frame(row)
     if pred is None or not frames:
         return False
-    return any(abs(int(pred) - int(frame)) <= tolerance for frame in frames)
+    return any(abs(pred - int(frame)) <= tolerance for frame in frames)
 
 
 def evaluate_results(
@@ -78,31 +121,55 @@ def evaluate_results(
     ks: tuple[int, ...] = DEFAULT_KS,
     frame_tolerance: int = 10,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Evaluate retrieval plus verified competition scoring where local GT permits it.
+
+    Current local GT can express Textual KIS video IDs and frame intervals, so
+    this benchmark binds the official KIS R-Score and Final Score rules. Q&A and
+    TRAKE are not silently scored here until their task-specific GT/output schema
+    is explicitly available.
+    """
     per_query: list[dict[str, Any]] = []
 
     for query_id, rows in results.items():
         gt = (ground_truth or {}).get(query_id, {})
-        relevant = set(str(x) for x in gt.get("video_ids", []))
+        relevant = {str(x) for x in gt.get("video_ids", [])}
         ranked = _ranked_ids(rows)
+        has_intervals = any(_intervals_for_video(gt, video_id) for video_id in relevant)
+        competition_enabled = bool(relevant and has_intervals)
         row: dict[str, Any] = {
             "query_id": query_id,
+            "task_type": str(gt.get("task_type", "UNKNOWN")),
             "num_candidates": len(rows),
             "top1_video_id": ranked[0] if ranked else "",
             "top1_score": float(rows[0]["rank_score"]) if rows else None,
             "top2_score": float(rows[1]["rank_score"]) if len(rows) > 1 else None,
             "top1_top2_gap": (float(rows[0]["rank_score"]) - float(rows[1]["rank_score"])) if len(rows) > 1 else None,
             "gt_available": bool(relevant),
+            "competition_kis_gt_available": competition_enabled,
         }
+
         if relevant:
             row["mrr"] = reciprocal_rank(ranked, relevant)
             for k in ks:
-                row[f"r@{k}"] = float(bool(set(ranked[:k]) & relevant))
-                row[f"frame_r@{k}"] = float(any(_frame_hit(candidate, gt, frame_tolerance) for candidate in rows[:k]))
+                row[f"video_recall@{k}"] = float(bool(set(ranked[:k]) & relevant))
+                row[f"frame_diagnostic@{k}"] = float(
+                    any(_frame_hit_diagnostic(candidate, gt, frame_tolerance) for candidate in rows[:k])
+                )
         else:
             row["mrr"] = None
             for k in ks:
-                row[f"r@{k}"] = None
-                row[f"frame_r@{k}"] = None
+                row[f"video_recall@{k}"] = None
+                row[f"frame_diagnostic@{k}"] = None
+
+        if competition_enabled:
+            candidate_scores = [_kis_candidate_r_score(candidate, gt) for candidate in rows]
+            profile = ranking_profile(candidate_scores, ks=ks)
+            for key, value in profile.items():
+                row[f"competition_{key}"] = float(value)
+        else:
+            for k in ks:
+                row[f"competition_r@{k}"] = None
+            row["competition_final_score"] = None
         per_query.append(row)
 
     if not per_query:
@@ -112,19 +179,32 @@ def evaluate_results(
     summary: dict[str, Any] = {
         "queries": int(len(df)),
         "queries_with_ground_truth": int(df["gt_available"].sum()),
+        "queries_with_kis_competition_gt": int(df["competition_kis_gt_available"].sum()),
         "mean_top1_top2_gap": float(df["top1_top2_gap"].dropna().mean()) if df["top1_top2_gap"].notna().any() else None,
     }
+
     gt_df = df[df["gt_available"]]
     if not gt_df.empty:
         summary["mrr"] = float(gt_df["mrr"].mean())
         for k in ks:
-            summary[f"r@{k}"] = float(gt_df[f"r@{k}"].mean())
-            summary[f"frame_r@{k}"] = float(gt_df[f"frame_r@{k}"].mean())
+            summary[f"video_recall@{k}"] = float(gt_df[f"video_recall@{k}"].mean())
+            summary[f"frame_diagnostic@{k}"] = float(gt_df[f"frame_diagnostic@{k}"].mean())
     else:
         summary["mrr"] = None
         for k in ks:
-            summary[f"r@{k}"] = None
-            summary[f"frame_r@{k}"] = None
+            summary[f"video_recall@{k}"] = None
+            summary[f"frame_diagnostic@{k}"] = None
+
+    competition_df = df[df["competition_kis_gt_available"]]
+    if not competition_df.empty:
+        for k in ks:
+            summary[f"competition_r@{k}"] = float(competition_df[f"competition_r@{k}"].mean())
+        summary["competition_final_score"] = float(competition_df["competition_final_score"].mean())
+    else:
+        for k in ks:
+            summary[f"competition_r@{k}"] = None
+        summary["competition_final_score"] = None
+
     return summary, per_query
 
 
@@ -177,7 +257,13 @@ def run_benchmark(
             localized: list[dict[str, Any]] = []
             for _, candidate in candidates.head(localize_top_k).iterrows():
                 event = pipeline.localize(candidate, radius_frames=radius_frames, max_decode_frames=max_decode_frames)
-                localized.append({**candidate.to_dict(), "temporal_start_frame": event.start_frame, "temporal_end_frame": event.end_frame, "semantic_keyframe": event.semantic_keyframe, "temporal_score": event.score})
+                localized.append({
+                    **candidate.to_dict(),
+                    "temporal_start_frame": event.start_frame,
+                    "temporal_end_frame": event.end_frame,
+                    "semantic_keyframe": event.semantic_keyframe,
+                    "temporal_score": event.score,
+                })
             localized_df = pd.DataFrame(localized)
             tail = candidates.iloc[localize_top_k:].copy()
             candidates = pd.concat([localized_df, tail], ignore_index=True)
