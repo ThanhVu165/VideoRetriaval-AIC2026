@@ -53,6 +53,12 @@ def main() -> None:
     retrieve.add_argument("--top-k", type=int, default=100)
     retrieve.add_argument("--radius-frames", type=int, default=24)
     retrieve.add_argument("--max-decode-frames", type=int, default=96)
+    retrieve.add_argument(
+        "--fine-score",
+        action="store_true",
+        help="Decode the temporal window and rescore original frames with CLIP",
+    )
+    retrieve.add_argument("--fine-batch-size", type=int, default=32)
 
     benchmark = sub.add_parser("benchmark", help="Run a query set and report retrieval/frame metrics")
     benchmark.add_argument("--queries", type=Path, required=True)
@@ -207,10 +213,24 @@ def main() -> None:
             evidence_stores=stores,
             evidence_rrf_k=args.evidence_rrf_k,
         )
+
+        frame_scorer = None
+        if args.fine_score:
+            from .temporal_grounding import CLIPTemporalGrounder
+
+            grounder = CLIPTemporalGrounder.create(
+                model_name=args.model_name,
+                pretrained=args.pretrained,
+                device=args.device,
+                batch_size=args.fine_batch_size,
+            )
+            frame_scorer = grounder.scorer(query_embedding)
+
         result = pipeline.run(
             args.query,
             query_embedding,
             top_k=args.top_k,
+            frame_scorer=frame_scorer,
             radius_frames=args.radius_frames,
             max_decode_frames=args.max_decode_frames,
         )
@@ -220,6 +240,7 @@ def main() -> None:
                 {
                     "rows": len(result),
                     "output": str(args.output),
+                    "fine_score": args.fine_score,
                     "evidence_modalities": [s.name for s in stores if s.available],
                     "evidence_requested": [s.name for s in stores],
                     "evidence_rrf_k": args.evidence_rrf_k,
