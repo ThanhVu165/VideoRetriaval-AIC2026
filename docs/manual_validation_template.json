@@ -1,0 +1,14 @@
+[
+  {
+    "query_id": "tkis-query-01",
+    "task_type": "TKIS",
+    "rank": 1,
+    "video_id": "",
+    "frame_id": null,
+    "video_match": false,
+    "frame_match": false,
+    "answer_match": null,
+    "event_id": null,
+    "notes": ""
+  }
+]
