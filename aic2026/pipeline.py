@@ -73,6 +73,7 @@ class RetrievalPipeline:
         evidence_rrf_k: int = 60,
         beit3_index: BEiT3Index | None = None,
         beit3_weight: float = 0.35,
+        auto_object_evidence: bool = True,
     ):
         self.frame_index = frame_index
         self.videos_dir = Path(videos_dir)
@@ -83,8 +84,8 @@ class RetrievalPipeline:
             rrf_k=evidence_rrf_k,
         )
         self.ranking_weights = ranking_weights or RankingWeights(
-            retrieval=0.55,
-            multimodal=0.30,
+            retrieval=0.45,
+            multimodal=0.40,
             temporal=0.15,
         )
         self.temporal_config = temporal_config or TemporalScoreConfig()
@@ -92,6 +93,32 @@ class RetrievalPipeline:
         if not 0.0 <= beit3_weight <= 1.0:
             raise ValueError("beit3_weight must be in [0, 1]")
         self.beit3_weight = float(beit3_weight)
+        self.auto_object_evidence = bool(auto_object_evidence)
+        self._object_root = self._infer_object_root()
+
+    def _infer_object_root(self) -> Path | None:
+        candidates = [
+            self.videos_dir.parent / "objects",
+            self.videos_dir.parent.parent / "objects",
+            Path("data/objects"),
+        ]
+        for root in candidates:
+            if root.exists() and root.is_dir():
+                return root
+        return None
+
+    def _object_path_for_video(self, video_id: str) -> str:
+        if not self.auto_object_evidence or self._object_root is None:
+            return ""
+        roots = [self._object_root / video_id, self._object_root / "objects" / video_id]
+        for root in roots:
+            if not root.exists():
+                continue
+            files = sorted(p for p in root.rglob("*.json") if p.is_file())
+            if files:
+                return str(files[0])
+        direct = self._object_root / f"{video_id}.json"
+        return str(direct) if direct.exists() else ""
 
     def _metadata_text(self, video_id: str) -> str:
         if self.media_info_dir is None:
@@ -122,6 +149,9 @@ class RetrievalPipeline:
             scores = top["score"].to_numpy(dtype=np.float32)
             top_mean = float(scores.mean())
             best_score = float(scores[0])
+            object_path = str(best.get("object_path", ""))
+            if not object_path:
+                object_path = str(best.get("auto_object_path", ""))
             records.append(
                 {
                     "video_id": str(video_id),
@@ -130,7 +160,7 @@ class RetrievalPipeline:
                     "best_frame_idx": int(best["keyframe_idx"]),
                     "best_frame_id": int(best["original_frame_id"]),
                     "best_pts_time": float(best["pts_time"]),
-                    "object_path": str(best.get("object_path", "")),
+                    "object_path": object_path,
                     "retrieval_best_score": best_score,
                     "retrieval_topk_mean": top_mean,
                     "retrieval_score_std": float(np.std(scores)) if len(scores) > 1 else 0.0,
@@ -178,6 +208,11 @@ class RetrievalPipeline:
         if not frames:
             return pd.DataFrame()
         rows = pd.DataFrame([x.__dict__ for x in frames])
+        if "object_path" not in rows.columns:
+            rows["object_path"] = ""
+        if self.auto_object_evidence:
+            rows["auto_object_path"] = [self._object_path_for_video(str(v)) for v in rows["video_id"]]
+            rows["object_path"] = rows["object_path"].where(rows["object_path"].astype(bool), rows["auto_object_path"])
         candidates = self._aggregate_frame_evidence(rows, per_video_k=per_video_k)
 
         if beit3_query_embedding is not None:
