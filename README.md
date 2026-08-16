@@ -2,6 +2,8 @@
 
 AIC 2026 Video Retrieval pipeline: dataset integrity → multimodal candidate retrieval → temporal localization → semantic keyframe alignment → VQA adapter → ranking/top-k output.
 
+**Project context:** read [`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md) before making architectural changes. It is the frozen engineering direction for AI agents.
+
 The implementation is modular. Competition data and generated artifacts stay outside Git.
 
 ## Pipeline
@@ -117,6 +119,18 @@ Event N → keyframe N
 
 `aic2026.ranking` keeps retrieval, temporal and multimodal evidence separate and produces a final `rank_score`. `top_k_submission()` provides deterministic Top-k candidate selection without claiming to implement an official BTC submission schema that has not been supplied to the repository.
 
+## Competition scoring foundation
+
+The supplied BTC PDF has now been encoded as pure scoring primitives in `aic2026.competition_metrics` and documented in [`docs/competition_scoring.md`](docs/competition_scoring.md). The module implements the verified Textual KIS, Q&A, TRAKE R-Score rules and the official `R@1/R@5/R@20/R@50/R@100 → Final Score` aggregation.
+
+It intentionally does **not** invent a query-file, ground-truth-file or submission-file schema. Those parsers will be added only when the actual BTC package is available.
+
+Run the scoring unit tests with:
+
+```bash
+python -m unittest tests.test_competition_metrics
+```
+
 ## End-to-end execution
 
 With a precomputed query embedding:
@@ -152,9 +166,10 @@ Implemented in the active development branch:
 - TRAKE monotonic semantic keyframe alignment
 - VQA model adapter contract
 - final candidate ranking and deterministic Top-k selection
-- unit tests for retrieval, temporal processing, alignment, ranking and fine scoring
+- benchmark and ground-truth template utilities
+- verified AIC2026 competition scoring primitives and tests
 
-The next research layer is learned reranking and a stronger temporal/video-language scorer; these should plug into the existing interfaces rather than redesign the data flow.
+The next implementation step is to connect the verified scoring primitives to a real local benchmark once the official query/ground-truth package is available, then measure the existing retrieval/temporal pipeline against it. Do not jump to new model stacks before that measurement path is executable.
 
 ## Development
 
