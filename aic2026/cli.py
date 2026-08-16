@@ -37,13 +37,13 @@ def main() -> None:
     inspect_evidence = sub.add_parser("inspect-evidence", help="Inspect an ASR/OCR/caption SQLite artifact")
     inspect_evidence.add_argument("--db", type=Path, required=True)
 
-    retrieve = sub.add_parser("retrieve", help="Run CLIP retrieval + BTC objects/metadata + optional evidence + temporal localization")
+    retrieve = sub.add_parser("retrieve", help="Run unified CLIP + BTC support-data + evidence + temporal retrieval")
     retrieve.add_argument("--manifest", type=Path, required=True)
     retrieve.add_argument("--embeddings", type=Path, required=True)
     retrieve.add_argument("--faiss-index", type=Path)
     retrieve.add_argument("--videos-dir", type=Path, required=True)
     retrieve.add_argument("--query", required=True)
-    retrieve.add_argument("--query-translated", help="Optional English translation of the query; fused with the original text embedding")
+    retrieve.add_argument("--query-translated", help="Optional organizer-provided English translation; fused 20/80 with the original query")
     retrieve.add_argument("--query-embedding", type=Path)
     retrieve.add_argument("--model-name", default="ViT-B-32-quickgelu")
     retrieve.add_argument("--pretrained", default="openai")
@@ -61,6 +61,8 @@ def main() -> None:
     retrieve.add_argument("--top-k", type=int, default=100)
     retrieve.add_argument("--radius-frames", type=int, default=24)
     retrieve.add_argument("--max-decode-frames", type=int, default=96)
+    retrieve.add_argument("--fine-score", action="store_true", help="Rescore original temporal frames with CLIP")
+    retrieve.add_argument("--fine-batch-size", type=int, default=32)
 
     benchmark = sub.add_parser("benchmark", help="Run a query set and report retrieval/frame metrics")
     benchmark.add_argument("--queries", type=Path, required=True)
@@ -164,19 +166,25 @@ def main() -> None:
         pipeline = AICPipeline(index, args.videos_dir, media_info_dir=_existing(args.media_info_dir), objects_dir=_existing(args.objects_dir),
                                 evidence_stores=stores, evidence_rrf_k=args.evidence_rrf_k,
                                 beit3_index=beit3_index, beit3_weight=args.beit3_weight)
-        result = pipeline.run(args.query, query_embedding, top_k=args.top_k, radius_frames=args.radius_frames,
-                              max_decode_frames=args.max_decode_frames, beit3_query_embedding=beit3_query_embedding,
+        frame_scorer = None
+        if args.fine_score:
+            from .temporal_grounding import CLIPTemporalGrounder
+            grounder = CLIPTemporalGrounder.create(model_name=args.model_name, pretrained=args.pretrained, device=args.device, batch_size=args.fine_batch_size)
+            frame_scorer = grounder.scorer(query_embedding)
+        result = pipeline.run(args.query, query_embedding, top_k=args.top_k, frame_scorer=frame_scorer,
+                              radius_frames=args.radius_frames, max_decode_frames=args.max_decode_frames,
+                              beit3_query_embedding=beit3_query_embedding,
                               scoring_query=args.query_translated or args.query)
         pipeline.write_candidates(result, args.output, top_k=args.top_k)
-        print(json.dumps({"rows": len(result), "output": str(args.output),
+        print(json.dumps({"rows": len(result), "output": str(args.output), "fine_score": args.fine_score,
                           "evidence_modalities": [s.name for s in stores if s.available],
                           "evidence_requested": [s.name for s in stores],
                           "btc_metadata_enabled": bool(_existing(args.media_info_dir)),
                           "btc_objects_enabled": bool(_existing(args.objects_dir)),
                           "translated_query_enabled": bool(args.query_translated),
                           "evidence_rrf_k": args.evidence_rrf_k,
-                          "beit3_enabled": bool(args.beit3),
-                          "beit3_weight": args.beit3_weight if args.beit3 else 0.0}, indent=2))
+                          "beit3_enabled": bool(args.beit3), "beit3_weight": args.beit3_weight if args.beit3 else 0.0}, indent=2))
+        return
 
 
 if __name__ == "__main__":
