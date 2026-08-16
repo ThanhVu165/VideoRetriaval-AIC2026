@@ -6,6 +6,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .support_data import resolve_object_path
+
 
 def _numeric_image_key(path: Path) -> tuple[int, str]:
     try:
@@ -16,8 +18,7 @@ def _numeric_image_key(path: Path) -> tuple[int, str]:
 
 def _discover_images(keyframe_video_dir: Path) -> list[Path]:
     images = [
-        p
-        for p in keyframe_video_dir.iterdir()
+        p for p in keyframe_video_dir.iterdir()
         if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png"}
     ]
     return sorted(images, key=_numeric_image_key)
@@ -30,8 +31,9 @@ def build_unified_dataset(
     output_manifest: str | Path,
     output_embeddings: str | Path,
     report_output: str | Path | None = None,
+    objects_dir: str | Path | None = None,
 ) -> dict[str, object]:
-    """Flatten BTC per-video CLIP files into one row-aligned retrieval index.
+    """Flatten BTC CLIP/keyframe/mapping data and attach object JSON paths.
 
     Alignment is validated independently for every video:
     CLIP row i <-> mapping row i <-> numerically sorted keyframe i.
@@ -46,6 +48,7 @@ def build_unified_dataset(
     rows: list[dict[str, object]] = []
     vectors: list[np.ndarray] = []
     errors: list[dict[str, str]] = []
+    object_hits = 0
 
     clip_files = sorted(clip_root.glob("*.npy"))
     for clip_path in clip_files:
@@ -59,10 +62,8 @@ def build_unified_dataset(
                 raise FileNotFoundError(f"missing keyframes: {video_keyframes}")
 
             embeddings = np.load(clip_path, allow_pickle=False)
-            if embeddings.ndim != 2:
-                raise ValueError(f"CLIP must be 2-D, got {embeddings.shape}")
-            if embeddings.shape[1] != 512:
-                raise ValueError(f"expected CLIP dimension 512, got {embeddings.shape[1]}")
+            if embeddings.ndim != 2 or embeddings.shape[1] != 512:
+                raise ValueError(f"expected CLIP shape (N, 512), got {embeddings.shape}")
 
             mapping = pd.read_csv(mapping_path)
             required = {"n", "pts_time", "fps", "frame_idx"}
@@ -81,17 +82,17 @@ def build_unified_dataset(
                 expected_n = i + 1
                 if int(map_row["n"]) != expected_n:
                     raise ValueError(f"mapping n is not contiguous at row {i}: {map_row['n']}")
-                rows.append(
-                    {
-                        "video_id": video_id,
-                        "keyframe_idx": int(map_row["n"]),
-                        "original_frame_id": int(map_row["frame_idx"]),
-                        "pts_time": float(map_row["pts_time"]),
-                        "fps": float(map_row["fps"]),
-                        "image_path": str(image_path),
-                        "object_path": "",
-                    }
-                )
+                object_path = resolve_object_path(objects_dir, video_id, image_path)
+                object_hits += bool(object_path)
+                rows.append({
+                    "video_id": video_id,
+                    "keyframe_idx": int(map_row["n"]),
+                    "original_frame_id": int(map_row["frame_idx"]),
+                    "pts_time": float(map_row["pts_time"]),
+                    "fps": float(map_row["fps"]),
+                    "image_path": str(image_path),
+                    "object_path": object_path,
+                })
             vectors.append(np.asarray(embeddings, dtype=np.float32))
         except Exception as exc:  # noqa: BLE001
             errors.append({"video_id": video_id, "error": str(exc)})
@@ -117,9 +118,12 @@ def build_unified_dataset(
         "dimension": int(matrix.shape[1]),
         "source_dtype": "float16",
         "index_dtype": "float32",
+        "object_rows_resolved": int(object_hits),
+        "object_rows_missing": int(len(manifest) - object_hits),
         "clip_dir": str(clip_root),
         "mapping_dir": str(mapping_root),
         "keyframes_dir": str(keyframe_root),
+        "objects_dir": str(objects_dir) if objects_dir else "",
         "manifest": str(manifest_path),
         "embeddings": str(embedding_path),
     }
