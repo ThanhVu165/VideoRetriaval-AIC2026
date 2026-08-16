@@ -7,10 +7,10 @@ from typing import Iterable
 
 def _candidate_paths(root: Path, video_id: str, filename: str, suffix: str) -> Iterable[Path]:
     stem = Path(filename).stem
-    names = [f"{stem}{suffix}"]
-    yield root / video_id / names[0]
-    yield root / "objects" / video_id / names[0]
-    yield root / video_id / "objects" / names[0]
+    name = f"{stem}{suffix}"
+    yield root / video_id / name
+    yield root / "objects" / video_id / name
+    yield root / video_id / "objects" / name
 
 
 def resolve_object_path(objects_dir: str | Path | None, video_id: str, image_path: str | Path) -> str:
@@ -23,7 +23,6 @@ def resolve_object_path(objects_dir: str | Path | None, video_id: str, image_pat
     for candidate in _candidate_paths(root, video_id, image.name, ".json"):
         if candidate.is_file():
             return str(candidate)
-    # Fallback for datasets whose object tree mirrors the keyframe path.
     for candidate in root.rglob(image.stem + ".json"):
         if candidate.is_file() and candidate.parent.name == video_id:
             return str(candidate)
@@ -36,6 +35,7 @@ def load_metadata_text(media_info_dir: str | Path | None, video_id: str) -> str:
     root = Path(media_info_dir)
     candidates = (
         root / f"{video_id}.json",
+        root / "media-info" / f"{video_id}.json",
         root / video_id / "media_info.json",
         root / video_id / f"{video_id}.json",
     )
