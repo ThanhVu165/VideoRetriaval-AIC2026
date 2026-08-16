@@ -79,7 +79,7 @@ python -m aic2026 build-index \
   --output-index artifacts/clip_frames.faiss
 ```
 
-### Unified retrieval
+### Unified single-query retrieval
 
 The default retrieval path uses available BTC/support evidence. The organizer English translation can be supplied with `--query-translated`. `--fine-score` enables dense CLIP temporal rescoring. `--beit3` adds the optional BEiT-3 channel.
 
@@ -97,6 +97,26 @@ python -m aic2026 retrieve \
 ```
 
 The command reports which evidence modalities were actually available, whether BTC Objects/Metadata were resolved, whether translation was used, and whether BEiT-3/fine scoring was enabled.
+
+### Unified benchmark over the organizer query sheet
+
+For the supplied `DanhSachTruyVanAIC_Chungket.xlsx`, use the organizer English `Trans` column and keep the official maximum of 100 candidates:
+
+```bash
+python scripts/benchmark_unified.py \
+  --queries data/queries/DanhSachTruyVanAIC_Chungket.xlsx \
+  --manifest artifacts/clip_frames_manifest.parquet \
+  --embeddings artifacts/clip_frames.npy \
+  --faiss-index artifacts/clip_frames.faiss \
+  --videos-dir data/videos \
+  --media-info-dir data/media_info \
+  --objects-dir data/objects \
+  --top-k 100 \
+  --fine-score \
+  --output-dir artifacts/benchmark_unified
+```
+
+Use `--task-prefix tkis-`, `--task-prefix qa-`, `--task-prefix trake-`, or `--task-prefix vkis-` to isolate a query family. This benchmark uses the same canonical retrieval/temporal pipeline as the single-query CLI instead of maintaining a separate retrieval implementation.
 
 ## Retrieval design rules
 
