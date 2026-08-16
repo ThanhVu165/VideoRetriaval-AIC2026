@@ -8,14 +8,13 @@ import numpy as np
 
 @dataclass
 class CLIPQueryEncoder:
-    """Encode text queries into the 512-D CLIP space used by the dataset index.
+    """Encode text into the 512-D CLIP space used by BTC ViT-B/32 features.
 
-    The checkpoint is explicit on purpose: the text encoder must be compatible
-    with the supplied BTC ViT-B/32 visual features. Do not silently substitute
-    another CLIP checkpoint.
+    The default explicitly selects the QuickGELU OpenAI checkpoint because the
+    supplied BTC visual features come from the OpenAI CLIP ViT-B/32 family.
     """
 
-    model_name: str = "ViT-B-32"
+    model_name: str = "ViT-B-32-quickgelu"
     pretrained: str = "openai"
     device: str = "cpu"
 
