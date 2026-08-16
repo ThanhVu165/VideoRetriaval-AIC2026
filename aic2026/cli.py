@@ -93,35 +93,28 @@ def main() -> None:
     if args.command == "video-manifest":
         from .video_manifest import build_manifest
         report = build_manifest(args.video_dir, args.output, ("mp4", "mkv", "mov", "webm"))
-        print(json.dumps(report, indent=2))
-        return
+        print(json.dumps(report, indent=2)); return
 
     if args.command == "dataset-index":
         from .dataset_index import build_unified_dataset
-        report = build_unified_dataset(
-            clip_dir=args.clip_dir, mapping_dir=args.mapping_dir, keyframes_dir=args.keyframes_dir,
-            output_manifest=args.output_manifest, output_embeddings=args.output_embeddings,
-            report_output=args.report_output, objects_dir=args.objects_dir,
-        )
-        print(json.dumps(report, indent=2))
-        return
+        report = build_unified_dataset(clip_dir=args.clip_dir, mapping_dir=args.mapping_dir, keyframes_dir=args.keyframes_dir,
+                                       output_manifest=args.output_manifest, output_embeddings=args.output_embeddings,
+                                       report_output=args.report_output, objects_dir=args.objects_dir)
+        print(json.dumps(report, indent=2)); return
 
     if args.command == "build-index":
         from .index_builder import build_faiss_index
         report = build_faiss_index(args.manifest, args.embeddings, args.output_index, metadata_output=args.metadata_output)
-        print(json.dumps(report, indent=2))
-        return
+        print(json.dumps(report, indent=2)); return
 
     if args.command == "inspect-evidence":
         from .evidence import inspect_sqlite_evidence
-        print(json.dumps(inspect_sqlite_evidence(args.db), indent=2, ensure_ascii=False))
-        return
+        print(json.dumps(inspect_sqlite_evidence(args.db), indent=2, ensure_ascii=False)); return
 
     if args.command == "ground-truth-template":
         from .ground_truth import build_ground_truth_template
         report = build_ground_truth_template(queries_path=args.queries, output_path=args.output, query_column=args.query_column)
-        print(json.dumps(report, indent=2))
-        return
+        print(json.dumps(report, indent=2)); return
 
     if args.command == "benchmark":
         from .evidence import SQLiteEvidenceStore
@@ -129,29 +122,21 @@ def main() -> None:
         stores = []
         for path, name in ((args.asr_db, "asr"), (args.ocr_db, "ocr"), (args.caption_db, "caption")):
             p = _existing(path)
-            if p:
-                stores.append(SQLiteEvidenceStore(p, name))
-        report = run_benchmark(
-            queries_path=args.queries, manifest_path=args.manifest, embeddings_path=args.embeddings,
-            faiss_index_path=args.faiss_index, videos_dir=args.videos_dir, output_dir=args.output_dir,
-            query_column=args.query_column, model_name=args.model_name, pretrained=args.pretrained,
-            device=args.device, top_k=args.top_k, localize_top_k=args.localize_top_k,
-            radius_frames=args.radius_frames, max_decode_frames=args.max_decode_frames,
-            ground_truth_path=args.ground_truth, frame_tolerance=args.frame_tolerance,
-            evidence_stores=stores, evidence_rrf_k=args.evidence_rrf_k,
-        )
-        print(json.dumps(report, indent=2))
-        return
+            if p: stores.append(SQLiteEvidenceStore(p, name))
+        report = run_benchmark(queries_path=args.queries, manifest_path=args.manifest, embeddings_path=args.embeddings,
+                               faiss_index_path=args.faiss_index, videos_dir=args.videos_dir, output_dir=args.output_dir,
+                               query_column=args.query_column, model_name=args.model_name, pretrained=args.pretrained,
+                               device=args.device, top_k=args.top_k, localize_top_k=args.localize_top_k,
+                               radius_frames=args.radius_frames, max_decode_frames=args.max_decode_frames,
+                               ground_truth_path=args.ground_truth, frame_tolerance=args.frame_tolerance,
+                               evidence_stores=stores, evidence_rrf_k=args.evidence_rrf_k)
+        print(json.dumps(report, indent=2)); return
 
     if args.command == "retrieve":
         from .evidence import SQLiteEvidenceStore
         from .pipeline import AICPipeline
         from .retrieval import FrameIndex
-
-        if args.faiss_index:
-            index = FrameIndex.from_persisted_faiss(args.manifest, args.embeddings, args.faiss_index)
-        else:
-            index = FrameIndex.from_files(args.manifest, args.embeddings)
+        index = FrameIndex.from_persisted_faiss(args.manifest, args.embeddings, args.faiss_index) if args.faiss_index else FrameIndex.from_files(args.manifest, args.embeddings)
 
         if args.query_embedding:
             query_embedding = np.load(args.query_embedding, allow_pickle=False)
@@ -167,40 +152,31 @@ def main() -> None:
         stores = []
         for path, name in ((args.asr_db, "asr"), (args.ocr_db, "ocr"), (args.caption_db, "caption")):
             p = _existing(path)
-            if p:
-                stores.append(SQLiteEvidenceStore(p, name))
+            if p: stores.append(SQLiteEvidenceStore(p, name))
 
-        beit3_index = None
-        beit3_query_embedding = None
+        beit3_index = None; beit3_query_embedding = None
         if args.beit3:
             from .beit3 import BEiT3Index
             from .beit3_query import BEiT3QueryEncoder
             beit3_index = BEiT3Index.from_files(args.manifest, args.beit3_index)
-            beit3_encoder = BEiT3QueryEncoder(device=args.device)
-            beit3_query_embedding = beit3_encoder.encode_one(args.query_translated or args.query)
+            beit3_query_embedding = BEiT3QueryEncoder(device=args.device).encode_one(args.query_translated or args.query)
 
-        pipeline = AICPipeline(
-            index, args.videos_dir, media_info_dir=_existing(args.media_info_dir), objects_dir=_existing(args.objects_dir),
-            evidence_stores=stores, evidence_rrf_k=args.evidence_rrf_k,
-            beit3_index=beit3_index, beit3_weight=args.beit3_weight,
-        )
-        result = pipeline.run(
-            args.query, query_embedding, top_k=args.top_k,
-            radius_frames=args.radius_frames, max_decode_frames=args.max_decode_frames,
-            beit3_query_embedding=beit3_query_embedding,
-        )
+        pipeline = AICPipeline(index, args.videos_dir, media_info_dir=_existing(args.media_info_dir), objects_dir=_existing(args.objects_dir),
+                                evidence_stores=stores, evidence_rrf_k=args.evidence_rrf_k,
+                                beit3_index=beit3_index, beit3_weight=args.beit3_weight)
+        result = pipeline.run(args.query, query_embedding, top_k=args.top_k, radius_frames=args.radius_frames,
+                              max_decode_frames=args.max_decode_frames, beit3_query_embedding=beit3_query_embedding,
+                              scoring_query=args.query_translated or args.query)
         pipeline.write_candidates(result, args.output, top_k=args.top_k)
-        print(json.dumps({
-            "rows": len(result), "output": str(args.output),
-            "evidence_modalities": [s.name for s in stores if s.available],
-            "evidence_requested": [s.name for s in stores],
-            "btc_metadata_enabled": bool(_existing(args.media_info_dir)),
-            "btc_objects_enabled": bool(_existing(args.objects_dir)),
-            "translated_query_enabled": bool(args.query_translated),
-            "evidence_rrf_k": args.evidence_rrf_k,
-            "beit3_enabled": bool(args.beit3),
-            "beit3_weight": args.beit3_weight if args.beit3 else 0.0,
-        }, indent=2))
+        print(json.dumps({"rows": len(result), "output": str(args.output),
+                          "evidence_modalities": [s.name for s in stores if s.available],
+                          "evidence_requested": [s.name for s in stores],
+                          "btc_metadata_enabled": bool(_existing(args.media_info_dir)),
+                          "btc_objects_enabled": bool(_existing(args.objects_dir)),
+                          "translated_query_enabled": bool(args.query_translated),
+                          "evidence_rrf_k": args.evidence_rrf_k,
+                          "beit3_enabled": bool(args.beit3),
+                          "beit3_weight": args.beit3_weight if args.beit3 else 0.0}, indent=2))
 
 
 if __name__ == "__main__":
