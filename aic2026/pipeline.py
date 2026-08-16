@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -10,15 +9,11 @@ import pandas as pd
 
 from .beit3 import BEiT3Index
 from .evidence import EvidenceStore
-from .fine_scoring import (
-    FrameScorerProtocol,
-    TemporalScoreConfig,
-    select_peak_frame,
-    temporal_event_score,
-)
+from .fine_scoring import FrameScorerProtocol, TemporalScoreConfig, select_peak_frame, temporal_event_score
 from .multimodal import MultimodalReranker
 from .ranking import RankingWeights, rerank_candidates, top_k_submission
 from .retrieval import FrameIndex
+from .support_data import load_metadata_text, resolve_object_path
 from .temporal import merge_frame_hits
 from .video import iter_frame_ids, probe_video
 
@@ -37,7 +32,7 @@ class LocalizedEvent:
 
 
 class VideoResolver:
-    """Resolve video IDs recursively under the configured video directory."""
+    """Resolve source video IDs recursively and expose duplicate-ID diagnostics."""
 
     def __init__(self, videos_dir: str | Path):
         self.videos_dir = Path(videos_dir)
@@ -57,6 +52,10 @@ class VideoResolver:
     def count(self) -> int:
         return len(self._paths)
 
+    @property
+    def duplicates(self) -> dict[str, list[Path]]:
+        return self._duplicates
+
     def resolve(self, video_id: str) -> Path | None:
         return self._paths.get(video_id)
 
@@ -67,6 +66,7 @@ class RetrievalPipeline:
         frame_index: FrameIndex,
         videos_dir: str | Path,
         media_info_dir: str | Path | None = None,
+        objects_dir: str | Path | None = None,
         ranking_weights: RankingWeights | None = None,
         temporal_config: TemporalScoreConfig | None = None,
         evidence_stores: Sequence[EvidenceStore] | None = None,
@@ -77,39 +77,43 @@ class RetrievalPipeline:
         self.frame_index = frame_index
         self.videos_dir = Path(videos_dir)
         self.media_info_dir = Path(media_info_dir) if media_info_dir else None
+        self.objects_dir = Path(objects_dir) if objects_dir else None
         self.video_resolver = VideoResolver(self.videos_dir)
-        self.reranker = MultimodalReranker(
-            evidence_stores=evidence_stores,
-            rrf_k=evidence_rrf_k,
-        )
-        self.ranking_weights = ranking_weights or RankingWeights(
-            retrieval=0.55,
-            multimodal=0.30,
-            temporal=0.15,
-        )
+        self.reranker = MultimodalReranker(evidence_stores=evidence_stores, rrf_k=evidence_rrf_k)
+        self.ranking_weights = ranking_weights or RankingWeights(retrieval=0.55, multimodal=0.30, temporal=0.15)
         self.temporal_config = temporal_config or TemporalScoreConfig()
         self.beit3_index = beit3_index
         if not 0.0 <= beit3_weight <= 1.0:
             raise ValueError("beit3_weight must be in [0, 1]")
         self.beit3_weight = float(beit3_weight)
 
-    def _metadata_text(self, video_id: str) -> str:
-        if self.media_info_dir is None:
-            return ""
-        candidates = [
-            self.media_info_dir / f"{video_id}.json",
-            self.media_info_dir / video_id / "media_info.json",
-            self.media_info_dir / video_id / f"{video_id}.json",
-        ]
-        for path in candidates:
-            if not path.exists() or not path.is_file():
+    def _enrich_support_paths(self, candidates: pd.DataFrame) -> pd.DataFrame:
+        out = candidates.copy()
+        if "object_path" not in out:
+            out["object_path"] = ""
+        resolved: list[str] = []
+        for _, row in out.iterrows():
+            current = str(row.get("object_path", "") or "")
+            if current and Path(current).is_file():
+                resolved.append(current)
                 continue
-            try:
-                with path.open("r", encoding="utf-8") as f:
-                    return json.dumps(json.load(f), ensure_ascii=False)
-            except (OSError, ValueError, TypeError):
-                continue
-        return ""
+            resolved.append(resolve_object_path(self.objects_dir, str(row["video_id"]), str(row.get("image_path", ""))))
+        # Candidates aggregated from frame hits no longer carry image_path. Recover it from the
+        # row identified by best_frame_id so object JSON remains frame-aligned.
+        if any(not x for x in resolved):
+            for i, row in out.iterrows():
+                if resolved[i]:
+                    continue
+                matches = self.frame_index.manifest[
+                    (self.frame_index.manifest["video_id"].astype(str) == str(row["video_id"]))
+                    & (self.frame_index.manifest["original_frame_id"].astype(int) == int(row["best_frame_id"]))
+                ]
+                if not matches.empty:
+                    image_path = str(matches.iloc[0]["image_path"])
+                    resolved[i] = resolve_object_path(self.objects_dir, str(row["video_id"]), image_path)
+        out["object_path"] = resolved
+        out["metadata_text"] = [load_metadata_text(self.media_info_dir, str(v)) for v in out["video_id"]]
+        return out
 
     @staticmethod
     def _aggregate_frame_evidence(rows: pd.DataFrame, per_video_k: int = 5) -> pd.DataFrame:
@@ -122,20 +126,18 @@ class RetrievalPipeline:
             scores = top["score"].to_numpy(dtype=np.float32)
             top_mean = float(scores.mean())
             best_score = float(scores[0])
-            records.append(
-                {
-                    "video_id": str(video_id),
-                    "score": 0.75 * best_score + 0.25 * top_mean,
-                    "retrieval_score": 0.75 * best_score + 0.25 * top_mean,
-                    "best_frame_idx": int(best["keyframe_idx"]),
-                    "best_frame_id": int(best["original_frame_id"]),
-                    "best_pts_time": float(best["pts_time"]),
-                    "object_path": str(best.get("object_path", "")),
-                    "retrieval_best_score": best_score,
-                    "retrieval_topk_mean": top_mean,
-                    "retrieval_score_std": float(np.std(scores)) if len(scores) > 1 else 0.0,
-                }
-            )
+            records.append({
+                "video_id": str(video_id),
+                "score": 0.75 * best_score + 0.25 * top_mean,
+                "retrieval_score": 0.75 * best_score + 0.25 * top_mean,
+                "best_frame_idx": int(best["keyframe_idx"]),
+                "best_frame_id": int(best["original_frame_id"]),
+                "best_pts_time": float(best["pts_time"]),
+                "object_path": str(best.get("object_path", "")),
+                "retrieval_best_score": best_score,
+                "retrieval_topk_mean": top_mean,
+                "retrieval_score_std": float(np.std(scores)) if len(scores) > 1 else 0.0,
+            })
         return pd.DataFrame(records).sort_values("retrieval_score", ascending=False).reset_index(drop=True)
 
     @staticmethod
@@ -147,14 +149,12 @@ class RetrievalPipeline:
         for video_id, group in rows.groupby("video_id", sort=False):
             top = group.head(per_video_k)
             best = top.iloc[0]
-            records.append(
-                {
-                    "video_id": str(video_id),
-                    "beit3_score": float(0.75 * best["score"] + 0.25 * top["score"].mean()),
-                    "beit3_best_frame_id": int(best["original_frame_id"]),
-                    "beit3_pts_time": float(best["pts_time"]),
-                }
-            )
+            records.append({
+                "video_id": str(video_id),
+                "beit3_score": float(0.75 * best["score"] + 0.25 * top["score"].mean()),
+                "beit3_best_frame_id": int(best["original_frame_id"]),
+                "beit3_pts_time": float(best["pts_time"]),
+            })
         return pd.DataFrame(records)
 
     @staticmethod
@@ -196,11 +196,10 @@ class RetrievalPipeline:
             candidates["best_frame_id"] = candidates["best_frame_id"].fillna(candidates["beit3_best_frame_id"]).astype(int)
             candidates["best_pts_time"] = candidates["best_pts_time"].fillna(candidates["beit3_pts_time"])
             candidates["object_path"] = candidates.get("object_path", pd.Series([""] * len(candidates))).fillna("")
-            candidates["retrieval_best_score"] = candidates.get("retrieval_best_score", pd.Series([0.0] * len(candidates))).fillna(0.0)
-            candidates["retrieval_topk_mean"] = candidates.get("retrieval_topk_mean", pd.Series([0.0] * len(candidates))).fillna(0.0)
-            candidates["retrieval_score_std"] = candidates.get("retrieval_score_std", pd.Series([0.0] * len(candidates))).fillna(0.0)
+            for col in ("retrieval_best_score", "retrieval_topk_mean", "retrieval_score_std"):
+                candidates[col] = candidates.get(col, pd.Series([0.0] * len(candidates))).fillna(0.0)
 
-        candidates["metadata_text"] = [self._metadata_text(v) for v in candidates["video_id"]]
+        candidates = self._enrich_support_paths(candidates)
         try:
             fused = self.reranker.score_manifest(query, candidates)
         except (AttributeError, TypeError, KeyError, ValueError):
@@ -209,9 +208,8 @@ class RetrievalPipeline:
 
         fused["multimodal_score"] = fused["fused_score"]
         keep = [
-            "video_id", "retrieval_score", "multimodal_score", "best_frame_idx",
-            "best_frame_id", "best_pts_time", "object_path", "retrieval_best_score",
-            "retrieval_topk_mean", "retrieval_score_std",
+            "video_id", "retrieval_score", "multimodal_score", "best_frame_idx", "best_frame_id",
+            "best_pts_time", "object_path", "retrieval_best_score", "retrieval_topk_mean", "retrieval_score_std",
         ]
         candidates = fused[keep].copy()
         candidates["temporal_score"] = 0.0
@@ -228,10 +226,7 @@ class RetrievalPipeline:
         coarse = int(candidate["best_frame_id"])
         video_path = self.video_resolver.resolve(video_id)
         if video_path is None:
-            raise FileNotFoundError(
-                f"Source video not found for {video_id} under {self.videos_dir} "
-                f"(discovered {self.video_resolver.count} videos recursively)"
-            )
+            raise FileNotFoundError(f"Source video not found for {video_id} under {self.videos_dir}")
         info = probe_video(video_path)
         if info.frame_count <= 0:
             raise RuntimeError(f"Video has no decodable frames: {video_path}")
@@ -276,14 +271,7 @@ class RetrievalPipeline:
     ) -> pd.DataFrame:
         top_k_frames = max(top_k * 10, 1000)
         top_k_videos = min(max(top_k, 1), 100)
-        candidates = self.retrieve(
-            query,
-            query_embedding,
-            top_k_frames=top_k_frames,
-            top_k_videos=top_k_videos,
-            per_video_k=5,
-            beit3_query_embedding=beit3_query_embedding,
-        )
+        candidates = self.retrieve(query, query_embedding, top_k_frames=top_k_frames, top_k_videos=top_k_videos, per_video_k=5, beit3_query_embedding=beit3_query_embedding)
         if candidates.empty:
             return candidates
         events: list[dict[str, object]] = []
