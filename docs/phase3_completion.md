@@ -13,7 +13,7 @@ This phase focuses on **functional completeness before optimization**.
 3. Original-video temporal decoding.
 4. CLIP fine scoring over decoded original frames.
 5. Semantic peak-frame selection and temporal window scoring.
-6. Final ranking and Top-k submission output.
+6. Final ranking and Top-k candidate output.
 
 The fine scorer is intentionally a baseline. It is not a learned temporal model.
 
@@ -28,16 +28,6 @@ The fine scorer is intentionally a baseline. It is not a learned temporal model.
 5. Monotonic dynamic-programming alignment.
 6. One semantic keyframe per ordered event.
 
-Example input:
-
-```json
-[
-  "a person enters the room",
-  "the person sits at a table",
-  "the person leaves the room"
-]
-```
-
 ### Q&A
 
 `aic2026 vqa` performs retrieval + temporal localization + VLM answer generation.
@@ -51,15 +41,28 @@ The output contains:
 - evidence frame ids
 - generated answer
 
+## Evaluation status
+
+The verified BTC scoring primitives now live in `aic2026.competition_metrics`.
+The development benchmark binds them to the local KIS GT contract when explicit
+video IDs and frame intervals are supplied.
+
+The benchmark deliberately distinguishes:
+
+- official-compatible `competition_r@k` / `competition_final_score` for KIS;
+- generic retrieval/localization diagnostics such as `video_recall@k`, `frame_diagnostic@k`, and MRR.
+
+Q&A and TRAKE are not declared officially evaluated yet because their
+organizer-specific query/GT/output schema has not been bound.
+
 ## Still required before competition submission
 
 1. Bind the official query spreadsheet schema for all task types.
-2. Build/verify task-specific ground truth and evaluator outputs.
-3. Validate the exact submission format required by the organizer.
-4. Run all official queries end-to-end.
-5. Replace the baseline CLIP temporal scorer with a stronger temporal/VLM model.
-6. Train and calibrate a learned reranker on verified ground truth.
-7. Add task-specific answer normalization and evaluation for Q&A.
+2. Bind/verify task-specific Q&A ground truth, semantic answer matching and evaluator outputs.
+3. Bind/verify task-specific TRAKE ground truth and evaluator outputs.
+4. Validate the exact submission format required by the organizer.
+5. Run all official queries end-to-end.
+6. Replace the baseline CLIP temporal scorer with a stronger temporal/VLM model after measuring a baseline.
+7. Train and calibrate a learned reranker only after verified relevance labels are available.
 
-The objective of this phase is to remove missing functionality, not to maximize
-leaderboard score yet.
+The objective of this phase is to remove missing functionality and establish a measurable evaluation boundary, not to maximize leaderboard score yet.
